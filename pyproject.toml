@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-first-agent-harness"
+version = "0.1.0"
+description = "A local-first coding agent — fixes real bugs on your local model, escalates to the cloud only when it's stuck, and grades itself with real tests."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "ziyilam3999" }]
+keywords = ["local-llm", "coding-agent", "swe-bench", "self-hosted", "ai-agent", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["swebench"]
+
+[project.urls]
+Homepage = "https://github.com/ziyilam3999/local-first-agent-harness"
+Repository = "https://github.com/ziyilam3999/local-first-agent-harness"
+
+[project.scripts]
+lfah = "lfah.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+lfah = ["eval_patch.sh", "bundle/agents/*.md", "bundle/skills/*/SKILL.md"]
