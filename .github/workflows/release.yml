@@ -1,0 +1,54 @@
+name: Release
+
+# Push a tag like v0.2.0 to cut a GitHub Release. The release body is the
+# matching section pulled out of CHANGELOG.md, so the changelog stays the
+# single source of truth for "what changed".
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard — tag must match pyproject version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PROJ=$(grep -E '^version = ' pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$TAG" != "$PROJ" ]; then
+            echo "ERROR: tag v$TAG does not match pyproject version $PROJ."
+            echo "Bump the version in pyproject.toml and CHANGELOG.md before tagging."
+            exit 1
+          fi
+          echo "version guard OK: $PROJ"
+
+      - name: Extract CHANGELOG section for this tag
+        id: notes
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Print lines from "## [VERSION]" up to (but not including) the next "## " heading.
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" {grab=1; next}
+            grab && /^## / {exit}
+            grab {print}
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No CHANGELOG section for $VERSION — using a generic note." > release-notes.md
+          fi
+          echo "notes-file=release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "${{ steps.notes.outputs.notes-file }}"

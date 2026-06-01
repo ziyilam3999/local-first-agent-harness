@@ -22,7 +22,7 @@ This module is the chain engine. Ground-truth scoring is the SWE-bench docker or
 (eval_patch.sh / oracle_eval).
 """
 from __future__ import annotations
-import argparse, json, os, re, signal, subprocess, sys, threading, time
+import json, os, re, signal, subprocess, sys, threading, time
 from collections import Counter, deque
 from pathlib import Path
 
@@ -565,7 +565,7 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
     if not lessons_lessons:
         lessons_topic = instance["repo"].split("/")[-1]
         lessons_lessons = lessons_find(lessons_topic)
-    lessons_block = (f"\n\nRELEVANT PRIOR LESSONS (factor these into your review):\n"
+    lessons_block = ("\n\nRELEVANT PRIOR LESSONS (factor these into your review):\n"
                    + (lessons_lessons if lessons_lessons else "(none on record for this topic)") + "\n")
 
     # ---- planner (once) ----
@@ -610,7 +610,7 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
     MAX_ITERS = 1 + N1 + N2          # AFTER the pre-code gate: the loop ceiling reflects the replan
                                      # budget the gate may already have spent (keeps the cap tight)
     verdict = None
-    last_diff, last_eval, last_eval_text = "", None, ""
+    last_diff, last_eval_text = "", ""
     iteration = 0
     while True:
         # ---- executor ----
@@ -649,7 +649,7 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
                       backend=role_backends["evaluator"], user_prompt=eval_prompt,
                       cwd=repo, max_turns=MAX_TURNS_EVAL, dry_run=dry_run)
         rounds_used += 1
-        last_eval, last_eval_text = ev, ev["response"]
+        last_eval_text = ev["response"]
 
         # ---- orchestrator decision (deterministic rule-table; no coordinator LLM) ----
         action = decide_action(oracle_resolved=oracle["resolved"], eval_text=last_eval_text,

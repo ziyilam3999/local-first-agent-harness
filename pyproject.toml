@@ -24,6 +24,9 @@ classifiers = [
 ]
 dependencies = ["swebench"]
 
+[project.optional-dependencies]
+dev = ["ruff>=0.5", "pytest>=7"]
+
 [project.urls]
 Homepage = "https://github.com/ziyilam3999/local-first-agent-harness"
 Repository = "https://github.com/ziyilam3999/local-first-agent-harness"
@@ -36,3 +39,14 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 lfah = ["eval_patch.sh", "bundle/agents/*.md", "bundle/skills/*/SKILL.md"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# Keep pyflakes (F) — real correctness (undefined names, unused imports/vars).
+# Drop the stylistic E rules the relay engine uses deliberately (compact
+# single-line statements + long telemetry lines).
+select = ["E", "F", "W"]
+ignore = ["E401", "E701", "E702", "E501", "E741"]
