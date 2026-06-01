@@ -1,5 +1,9 @@
 # local-first-agent-harness
 
+[![CI](https://github.com/ziyilam3999/local-first-agent-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/ziyilam3999/local-first-agent-harness/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+
 **A local-first agent harness that fixes real code bugs — runs the heavy work on your local model, escalates to the cloud only when it's stuck, and grades itself with real tests (not an LLM).**
 
 Most "AI coding agent" demos run every step on an expensive cloud model and grade themselves
@@ -54,6 +58,22 @@ time budget. Every role can run on a different model (heterogeneous per-role mod
 executor runs locally you can turn on **cloud fallback** so a hard bug the local tier can't crack is
 handed to a cloud model — while the honest local result is preserved separately.
 
+```mermaid
+flowchart LR
+    I[Instance<br/>failing test + repo] --> P[Planner<br/>cloud · root cause + AC]
+    P --> X["Executor<br/><b>local model</b> · edits the repo"]
+    X --> O{{eval_patch.sh<br/>SWE-bench Docker oracle}}
+    O -- RESOLVED --> E[Evaluator<br/>cloud · different model]
+    O -- "stuck / timeout" --> F[Cloud fallback<br/>same plan, cloud model]
+    F --> O
+    E --> D{Orchestrator<br/>Ship / Iterate}
+    D -- Iterate --> P
+    D -- Ship --> R[Result JSON<br/>local outcome + handoff + telemetry]
+```
+
+The orchestrator and the oracle are free Python — only the three boxed roles cost tokens, and in
+local-first mode the heavy one (executor) is free too.
+
 ## Quickstart (cloud-only, ~5 minutes)
 
 The easiest way to try it: run all three roles on the cloud. No local model required.
@@ -68,8 +88,11 @@ The easiest way to try it: run all three roles on the cloud. No local model requ
 **Install:**
 
 ```bash
-pip install local-first-agent-harness
+pip install git+https://github.com/ziyilam3999/local-first-agent-harness
 ```
+
+> Not on PyPI yet — install straight from GitHub with the command above. A PyPI release
+> (`pip install local-first-agent-harness`) is planned.
 
 **Run on the bundled example** (a real Flask bug):
 
@@ -98,9 +121,23 @@ only pay for the cloud when the local model gives up.
    ollama pull qwen3-coder
    ```
 
-2. **Put a local, OpenAI/Anthropic-compatible proxy in front of Ollama** so the `claude` CLI can
-   talk to it. The engine points the local backend at `LFAH_CCR_BASE_URL` (default
-   `http://127.0.0.1:3456`) — set that to wherever your proxy listens.
+2. **Put a local, Anthropic-compatible proxy in front of Ollama** so the `claude` CLI can talk to
+   it. The CLI speaks the Anthropic Messages API; Ollama speaks its own — a small router bridges
+   them. The reference setup uses [claude-code-router](https://github.com/musistudio/claude-code-router):
+
+   ```bash
+   npm install -g @musistudio/claude-code-router
+   ccr start                       # listens on http://127.0.0.1:3456 by default
+   curl -s http://127.0.0.1:3456/ >/dev/null && echo "proxy up"
+   ```
+
+   The engine points the local backend at `LFAH_CCR_BASE_URL` (default `http://127.0.0.1:3456`) —
+   set that env var if your proxy listens elsewhere. Any Anthropic-compatible shim works; it just
+   has to forward to your Ollama model.
+
+   > **Hardware.** The executor is the heavy role. A 30B-class quantized coding model wants roughly
+   > 24–32 GB of free RAM/VRAM; only one local model is ever resident at a time (planner and
+   > evaluator stay on the cloud), so you don't need to fit several at once.
 
 3. **Run local-first with one flag:**
 

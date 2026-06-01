@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install (package without deps + dev tools)
+        # The unit tests exercise import, the role bundle, and the orchestrator
+        # rule-table — none of which touch `swebench` (it is invoked only as a
+        # subprocess at oracle time). So we install the package with --no-deps
+        # to keep CI fast and free of the heavy ML dependency tree.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-deps -e .
+          python -m pip install "ruff>=0.5" "pytest>=7"
+
+      - name: Lint (ruff — pyflakes correctness, compact-style E rules ignored)
+        run: ruff check src/ tests/
+
+      - name: Tests (pytest)
+        run: pytest tests/ -q
+
+  commit-lint:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate HEAD commit message (Conventional Commits)
+        shell: bash
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+          if echo "$COMMIT_MSG" | grep -qE "^Merge "; then exit 0; fi
+          if ! echo "$COMMIT_MSG" | grep -qE "^(feat|fix|docs|chore|refactor|test|style|perf|ci|build|revert)(\(.+\))?(!)?: .+"; then
+            echo "ERROR: HEAD commit message does not follow Conventional Commits."
+            echo "  Got: $COMMIT_MSG"
+            echo "  Expected: <type>(<scope>): <subject>  e.g. 'fix(relay): handle empty diff'"
+            exit 1
+          fi
+          echo "commit message OK: $COMMIT_MSG"

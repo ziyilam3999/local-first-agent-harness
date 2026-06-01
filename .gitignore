@@ -20,6 +20,7 @@ env/
 # Run outputs + local-only files
 runs/
 *.local
+.ai-workspace/
 
 # Build/quarantine scratch + macOS
 _quarantine*
