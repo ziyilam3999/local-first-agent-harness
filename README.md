@@ -63,16 +63,25 @@ saving** — while *matching* its quality on the hardest bugs. That's what local
 cheaper single call, but the full quality of an iterating, self-testing chain at **under half the
 full-cloud price**.
 
-Read another way — how the hybrid compares to each alternative:
+### Is the hybrid actually better? (honest, axis by axis)
 
-- **vs 1-shot Sonnet** — strictly better: cheaper *and* higher quality (Sonnet single-shot is the
-  weakest arm, dominated on both axes).
-- **vs 1-shot Opus** — smarter, because a single shot is *blind*: it writes a patch and hopes. The
-  hybrid plans, runs the real test, and retries — so it resolves more, and on the hardest bugs it
-  matched the full-cloud relay where one Opus shot fell short. (Opus single-shot is cheaper *per
-  win on easy bugs*, where one good shot is already enough.)
-- **vs full-cloud relay** — the same chain at ~half the price, matching it on the hardest bugs;
-  you trade a little raw quality on easy bugs for the 55% cost cut.
+It is **not** better on every axis — it's the best **value** and the best **default**. The one
+thing only the hybrid has is *all three* of: a real **plan**, **honest test-based grading with a
+retry** (it runs the project's real test, never an LLM judge), and **free local labor** for the
+heavy role. The single-shot arms lack the plan *and* the test-check; the full-cloud relay has both
+but pays the cloud for the labor.
+
+- **vs 1-shot Sonnet — strictly better.** Cheaper *and* higher quality; Sonnet single-shot is the
+  weakest arm, dominated on both axes.
+- **vs 1-shot Opus — smarter, especially on hard bugs.** A single shot is *blind* — it writes a
+  patch and hopes. The hybrid plans, runs the real test, and retries, so it resolves more (62% vs
+  54%) and on the hardest 7 bugs it matched the full-cloud relay where one Opus shot got only 3.
+  (Opus single-shot is cheaper *per win on easy bugs*, where one good shot already suffices.)
+- **vs full-cloud relay — the same chain at ~half the price.** It matches the full-cloud relay on
+  the hardest bugs; you trade a little raw quality on easy bugs for the 55% cost cut.
+
+**Bottom line:** when you don't know up front whether a bug is easy or hard, the hybrid is the arm
+to reach for — it plans and verifies like the expensive cloud chain, but does the heavy work for free.
 
 ## How it works
 
