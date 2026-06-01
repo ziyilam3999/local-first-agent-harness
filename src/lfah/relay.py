@@ -88,6 +88,15 @@ LOCAL_CHARS_PER_TOKEN = float(os.environ.get("LFAH_LOCAL_CHARS_PER_TOKEN", "3.24
 CLOUD_HANDOFF       = os.environ.get("LFAH_CLOUD_HANDOFF", "0") != "0"
 CLOUD_HANDOFF_MODEL = os.environ.get("LFAH_CLOUD_HANDOFF_MODEL", "sonnet")
 
+# Tools a headless chain role must NEVER be able to invoke. `--allowedTools` is an ALLOW set, but it
+# does NOT gate interactive/control tools that the CLI exposes by default: even when AskUserQuestion is
+# absent from --allowedTools, a role still calls it and the CLI executes it (auto-dismissed in -p mode),
+# burning a whole turn on a question no human can answer (the pytest-6197 no-edit failure: the local
+# executor explored, asked, and never edited). The CLI only suppresses it via --disallowedTools. Keep
+# this an env-overridable SSOT (comma-separated) so the denylist can grow without code edits.
+DISALLOWED_TOOLS = [t.strip() for t in
+                    os.environ.get("LFAH_DISALLOWED_TOOLS", "AskUserQuestion").split(",") if t.strip()]
+
 # Optional save hooks. Both default OFF so a public install never tries to write anywhere unexpected.
 SAVE_LEARNINGS = os.environ.get("RELAY_SAVE_LEARNINGS", "0") != "0"
 # Optional external "prior lessons" lookup binary. Disabled unless RELAY_LESSONS_BIN points at one.
@@ -168,6 +177,30 @@ def _role_env(backend: str) -> dict:
     return env
 
 
+def _build_role_cmd(*, model: str, max_turns: int, tools: list, system_prompt: str) -> list:
+    """Construct the `claude -p` argv for one role. Extracted from run_role so the flag contract
+    (allow set, disallow set, stdin-delivery) is unit-testable without spawning a subprocess."""
+    cmd = [
+        CLAUDE_BIN, "-p", "--model", model,
+        "--output-format", "stream-json", "--verbose",
+        "--permission-mode", "acceptEdits",
+        "--max-turns", str(max_turns),
+        "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+        "--setting-sources", "",
+        "--append-system-prompt", system_prompt,
+    ]
+    tools_csv = ",".join(tools)
+    if tools_csv:
+        cmd += ["--allowedTools", tools_csv]
+    # ENFORCE the deny set. --allowedTools alone does NOT keep a role off interactive/control tools the
+    # CLI exposes by default (verified: AskUserQuestion runs even when absent from --allowedTools); only
+    # --disallowedTools suppresses it. Without this a role can burn a turn on a question no human can
+    # answer (pytest-6197: explored, asked, never edited -> empty patch).
+    if DISALLOWED_TOOLS:
+        cmd += ["--disallowedTools", ",".join(DISALLOWED_TOOLS)]
+    return cmd
+
+
 def run_role(*, spec: dict, model: str, backend: str, user_prompt: str,
              cwd: Path, max_turns: int, dry_run: bool = False) -> dict:
     """Run one role as a real `claude -p` agent. Returns dict with response text,
@@ -178,18 +211,8 @@ def run_role(*, spec: dict, model: str, backend: str, user_prompt: str,
                 "input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
                 "cache_creation_input_tokens": 0, "duration_api_ms": 0, "duration_ms": 0,
                 "output_tps": 0.0, "model_resolved": model, "soft_error": "", "stuck_evidence": None}
-    tools_csv = ",".join(spec["tools"])
-    cmd = [
-        CLAUDE_BIN, "-p", "--model", model,
-        "--output-format", "stream-json", "--verbose",
-        "--permission-mode", "acceptEdits",
-        "--max-turns", str(max_turns),
-        "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-        "--setting-sources", "",
-        "--append-system-prompt", spec["system_prompt"],
-    ]
-    if tools_csv:
-        cmd += ["--allowedTools", tools_csv]
+    cmd = _build_role_cmd(model=model, max_turns=max_turns,
+                          tools=spec["tools"], system_prompt=spec["system_prompt"])
     # Deliver the prompt via STDIN, NOT as a trailing positional arg. In the current Claude Code CLI,
     # --allowedTools (and --mcp-config) are VARIADIC and slurp a trailing positional, so
     # `... --allowedTools <csv> <prompt>` consumes the prompt as another tool name -> claude errors
