@@ -17,14 +17,17 @@ the local-first hybrid relay — all graded by the SWE-bench Docker oracle:
 
 | Approach | Resolved | Total cost | $ / resolved |
 |---|---|---|---|
-| 1-shot Opus | 54% | $11.8 | $1.68 |
-| Full-cloud relay | **77%** | $35.0 | $3.50 |
-| **Local-first hybrid** | 54% (62% with cloud fallback) | **$15.7** | $2.24 |
+| 1-shot Opus | 54% (7/13) | $11.8 | $1.68 |
+| 1-shot Sonnet | 46% (6/13) | $21.3 | $3.54 |
+| Full-cloud relay | **77% (10/13)** | $35.0 | $3.50 |
+| **Local-first hybrid** | 54% (7/13) → **62% (8/13) with cloud fallback** | **$15.7** | $2.24 |
 
 The full-cloud relay is the quality ceiling. The **local-first hybrid matches single-shot Opus
 quality at ~45% of the full-cloud relay's cost** — and on the *hardest* tasks (the ones that need
-real iteration) it **matched** the full-cloud relay, and with cloud fallback edged ahead. In short:
-local-first is the value play, and it pays off exactly where it should — the hard bugs.
+real iteration) it **matched** the full-cloud relay, and with cloud fallback edged ahead. (1-shot
+Sonnet is the weakest arm here — lowest resolve rate *and* poor value, dominated by both Opus
+single-shot and the hybrid.) In short: local-first is the value play, and it pays off exactly where
+it should — the hard bugs.
 
 > n=13 is a small sample — these numbers are directional, not statistically significant, and "local"
 > means the *executor* runs locally (the planner/evaluator are still cloud). Reproduce with the
