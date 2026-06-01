@@ -37,6 +37,43 @@ it should — the hard bugs.
 > means the *executor* runs locally (the planner/evaluator are still cloud). Reproduce with the
 > commands below and judge for yourself.
 
+### Where the cost goes — and what "local" actually saves
+
+That cost column is the most counter-intuitive part, so it's worth being precise. The hybrid is
+*more* expensive than a single Opus shot ($15.7 vs $11.8) — which looks backwards when its heaviest
+role runs on a **free** local model. Here's where the hybrid's money actually went, per role, across
+the 13 bugs:
+
+| Role | Backend | Cost | Share |
+|---|---|---|---|
+| Planner | cloud Opus | $8.9 | 52% |
+| Evaluator | cloud | $6.8 | 40% |
+| **Executor** | **local model** | **$0.0** | **0%** |
+| Cloud fallback (hard bugs only) | cloud Sonnet | $1.4 | 8% |
+
+The executor is "heaviest" in **tokens and wall-time** — it does the actual file-editing labor
+(read, grep, edit, run tests, iterate) — and it ran for **free**. What you pay for is the two cloud
+*brains* around it: an architect that writes the plan and a reviewer that checks the diff and runs
+the real test, on every bug, sometimes twice.
+
+So the hybrid isn't cheaper than one Opus shot — a single shot has no planner, no reviewer, and no
+retry. The honest comparison is the **same chain run entirely in the cloud** (the full-cloud relay):
+moving just the executor to a local model cut that chain's cost from **$35.0 to $15.7 — a 55%
+saving** — while *matching* its quality on the hardest bugs. That's what local-first buys you: not a
+cheaper single call, but the full quality of an iterating, self-testing chain at **under half the
+full-cloud price**.
+
+Read another way — how the hybrid compares to each alternative:
+
+- **vs 1-shot Sonnet** — strictly better: cheaper *and* higher quality (Sonnet single-shot is the
+  weakest arm, dominated on both axes).
+- **vs 1-shot Opus** — smarter, because a single shot is *blind*: it writes a patch and hopes. The
+  hybrid plans, runs the real test, and retries — so it resolves more, and on the hardest bugs it
+  matched the full-cloud relay where one Opus shot fell short. (Opus single-shot is cheaper *per
+  win on easy bugs*, where one good shot is already enough.)
+- **vs full-cloud relay** — the same chain at ~half the price, matching it on the hardest bugs;
+  you trade a little raw quality on easy bugs for the 55% cost cut.
+
 ## How it works
 
 The engine is a small relay of three roles, run as real `claude` agent subprocesses, with a free
