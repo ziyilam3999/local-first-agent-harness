@@ -30,3 +30,9 @@ _quarantine*
 # dry-run scratch artifacts
 examples/patch.*.diff
 *.round*.diff
+
+# jest fixture materialization + oracle test-run scratch (#515)
+.jest-oracle-testrun-*
+.jest-wrapper-testrun-*
+tests/fixtures/jest/_materialized/
+.jest-dbg*

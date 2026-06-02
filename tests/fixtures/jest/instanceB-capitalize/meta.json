@@ -1,0 +1,8 @@
+{
+  "instance_id": "jest-fixture__capitalize-1",
+  "language": "javascript",
+  "repo": "local/jest-fixture-capitalize",
+  "problem_statement": "capitalize(s) returns the string unchanged instead of upper-casing the first character, so the tests in str.test.js fail. Fix capitalize() to upper-case the first letter while leaving an empty string empty.",
+  "FAIL_TO_PASS": "str.test.js",
+  "gold_patch": "gold.patch"
+}

@@ -38,7 +38,7 @@ lfah = "lfah.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-lfah = ["eval_patch.sh", "bundle/agents/*.md", "bundle/skills/*/SKILL.md"]
+lfah = ["eval_patch.sh", "eval_patch_jest.sh", "bundle/agents/*.md", "bundle/skills/*/SKILL.md"]
 
 [tool.ruff]
 line-length = 120
