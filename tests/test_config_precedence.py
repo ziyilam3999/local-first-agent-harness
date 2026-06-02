@@ -39,3 +39,41 @@ def test_timeout_floor_is_ssot_value_not_900():
     import os
     if not os.environ.get("LFAH_CLAUDE_TIMEOUT_S") and not os.environ.get("LOCAL_ROLE_TIMEOUT_S"):
         assert relay.CLAUDE_TIMEOUT_S == 1800
+
+
+# --- deprecated RK_* env warning (#581): a set-but-ignored config var must never be silent ---
+import io
+
+
+def test_warn_fires_for_known_rk_env_with_modern_hint():
+    env = {"RK_CLAUDE_TIMEOUT_S": "900"}
+    out = io.StringIO()
+    stale = relay._warn_deprecated_rk_env(env=env, out=out)
+    assert stale == ["RK_CLAUDE_TIMEOUT_S"]
+    msg = out.getvalue()
+    assert "RK_CLAUDE_TIMEOUT_S" in msg and "IGNORED" in msg
+    assert "LFAH_CLAUDE_TIMEOUT_S" in msg and "LOCAL_ROLE_TIMEOUT_S" in msg
+
+
+def test_warn_falls_back_to_rename_convention_for_unknown_rk():
+    env = {"RK_DATA_DIR": "/some/path"}
+    out = io.StringIO()
+    stale = relay._warn_deprecated_rk_env(env=env, out=out)
+    assert stale == ["RK_DATA_DIR"]
+    assert "LFAH_DATA_DIR" in out.getvalue()  # RK_X -> LFAH_X fallback
+
+
+def test_warn_silent_when_no_rk_env():
+    env = {"LFAH_CLAUDE_TIMEOUT_S": "1800", "PATH": "/usr/bin"}
+    out = io.StringIO()
+    stale = relay._warn_deprecated_rk_env(env=env, out=out)
+    assert stale == []
+    assert out.getvalue() == ""
+
+
+def test_warn_skips_blank_rk_env():
+    # an RK_ var present-but-empty is not a real misconfiguration -> no warning
+    env = {"RK_CLOUD_HANDOFF": "   "}
+    out = io.StringIO()
+    assert relay._warn_deprecated_rk_env(env=env, out=out) == []
+    assert out.getvalue() == ""
