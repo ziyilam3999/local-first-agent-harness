@@ -4,6 +4,8 @@ Guards the 2026-06-02 confound where the engine's per-role timeout default (900s
 cc-models.env SSOT (1800s) and a launcher set a typo'd env name the engine ignored -> the run silently
 ran at half the agreed cap. The fix routes each SSOT-backed knob through `_cfg(override, ssot, floor)`.
 """
+import io
+
 import lfah.relay as relay
 
 
@@ -42,9 +44,6 @@ def test_timeout_floor_is_ssot_value_not_900():
 
 
 # --- deprecated RK_* env warning (#581): a set-but-ignored config var must never be silent ---
-import io
-
-
 def test_warn_fires_for_known_rk_env_with_modern_hint():
     env = {"RK_CLAUDE_TIMEOUT_S": "900"}
     out = io.StringIO()
