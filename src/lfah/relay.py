@@ -37,14 +37,33 @@ VENV_PY = os.environ.get("LFAH_VENV_PY", sys.executable)
 # Base URL the local backend talks to (e.g. a local OpenAI-compatible proxy in front of Ollama).
 CCR_BASE_URL = os.environ.get("LFAH_CCR_BASE_URL", "http://127.0.0.1:3456")
 
+
+def _cfg(*names: str, default: str) -> str:
+    """Read a tunable from the FIRST non-empty env var in `names`, else `default`.
+
+    One-name-one-file convention: pass the explicit per-run OVERRIDE name first, then the canonical
+    cc-models.env SSOT name. The value lives ONCE in the SSOT and every consumer reads it under the
+    SAME name; an LFAH_-prefixed var is only an explicit per-run override. The `default` is a last-
+    resort FLOOR for when the SSOT is not sourced -- it must NOT contradict the SSOT (the 2026-06-02
+    confound was a 900s engine default that disagreed with the 1800s SSOT, masked by a typo'd env)."""
+    for n in names:
+        v = os.environ.get(n, "").strip()
+        if v:
+            return v
+    return default
+
 # Inlined code/diff extractor (kept for callers; the SHIP/ITERATE decision uses the deterministic
 # `decide_action` rule-table below, so there is no coordinator JSON to parse).
 def extract_python_code(text, last=False):
     blocks = re.findall(r"```(?:python|diff)?\n(.*?)```", text, re.DOTALL)
     return (blocks[-1] if last else blocks[0]).strip() if blocks else ""
 
-CLAUDE_TIMEOUT_S = int(os.environ.get("LFAH_CLAUDE_TIMEOUT_S", "900"))
-# The 30-min TIME cap (LFAH_CLAUDE_TIMEOUT_S) is the sole resource limit. One high backstop guards
+# Per-role TIME cap. SSOT = cc-models.env `LOCAL_ROLE_TIMEOUT_S` (1800s/30min, cloud-aware fail-fast,
+# PR#823). Precedence: explicit per-run override LFAH_CLAUDE_TIMEOUT_S > SSOT LOCAL_ROLE_TIMEOUT_S >
+# 1800 floor. The floor is the SSOT value (NOT the old 900) so a missing SSOT can never silently halve
+# the cap again (the 2026-06-02 confound). Source cc-models.env to set it; don't hard-code per launcher.
+CLAUDE_TIMEOUT_S = int(_cfg("LFAH_CLAUDE_TIMEOUT_S", "LOCAL_ROLE_TIMEOUT_S", default="1800"))
+# The 30-min TIME cap is the sole resource limit. One high backstop guards
 # only against a true infinite loop and never binds on real work -- TIME always caps first. The real
 # runaway-guard is STUCK-DETECTION (detect a looping agent live + stop it), below.
 _MOVE_BACKSTOP = int(os.environ.get("LFAH_MOVE_BACKSTOP", "500"))
@@ -82,11 +101,13 @@ LOCAL_CHARS_PER_TOKEN = float(os.environ.get("LFAH_LOCAL_CHARS_PER_TOKEN", "3.24
 # Local-first / cloud-fallback.
 # A: a LOCAL executor that TIMED OUT or got STUCK is NOT retried on the same local model -- a capped role is
 #    the FAILURE tail, not a slow solve, and retries rarely rescue. Fail fast.
-# C: when LFAH_CLOUD_HANDOFF=1, on that local timeout|stuck we HAND THE SAME PLAN to a cloud model
-#    (LFAH_CLOUD_HANDOFF_MODEL, the local-first/cloud-fallback product). The honest local result is
-#    UNCHANGED (final_resolved stays local's); the cloud outcome lands in a SEPARATE `handoff` field.
-CLOUD_HANDOFF       = os.environ.get("LFAH_CLOUD_HANDOFF", "0") != "0"
-CLOUD_HANDOFF_MODEL = os.environ.get("LFAH_CLOUD_HANDOFF_MODEL", "sonnet")
+# C: when cloud-handoff is ON, on that local timeout|stuck we HAND THE SAME PLAN to a cloud model. The
+#    honest local result is UNCHANGED (final_resolved stays local's); the cloud outcome lands in a
+#    SEPARATE `handoff` field. SSOT names live in cc-models.env (LOCAL_FAIL_CLOUD_HANDOFF=0,
+#    CLOUD_HANDOFF_MODEL=opus); an LFAH_-prefixed var is only an explicit per-run override. Precedence:
+#    override > SSOT > floor (one-name-one-file).
+CLOUD_HANDOFF       = _cfg("LFAH_CLOUD_HANDOFF", "LOCAL_FAIL_CLOUD_HANDOFF", default="0") != "0"
+CLOUD_HANDOFF_MODEL = _cfg("LFAH_CLOUD_HANDOFF_MODEL", "CLOUD_HANDOFF_MODEL", default="sonnet")
 
 # Tools a headless chain role must NEVER be able to invoke. `--allowedTools` is an ALLOW set, but it
 # does NOT gate interactive/control tools that the CLI exposes by default: even when AskUserQuestion is
