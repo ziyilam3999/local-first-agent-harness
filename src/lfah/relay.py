@@ -22,7 +22,7 @@ This module is the chain engine. Ground-truth scoring is the SWE-bench docker or
 (eval_patch.sh / oracle_eval).
 """
 from __future__ import annotations
-import json, os, re, signal, subprocess, sys, threading, time
+import json, os, re, shutil, signal, subprocess, sys, threading, time
 from collections import Counter, deque
 from pathlib import Path
 
@@ -496,6 +496,88 @@ def oracle_eval(instance_id: str, diff_path: Path, run_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Ground-truth oracle #2: JavaScript / jest. The first NON-Python grader -- proof that the
+# profile/oracle seam generalizes across languages. Same (instance_id, diff_path, run_id) ->
+# {resolved, report, rc} contract as oracle_eval, so the engine's profile indirection is unchanged.
+# Where oracle_eval reconstructs ground truth from the SWE-bench HF dataset keyed by instance_id,
+# this reconstructs it from a LOCAL instance dir (LFAH_DATA_DIR/instances/<id>/) -- symmetric, both
+# resolve everything from the id + a data-root env. Hermetic in docker by default (parity with the
+# pytest oracle); LFAH_JEST_DOCKER=0 runs jest on host node for a fast dev loop.
+# ---------------------------------------------------------------------------
+def jest_oracle_eval(instance_id: str, diff_path: Path, run_id: str) -> dict:
+    """Score a candidate patch against a JS/jest instance. resolved == the WHOLE suite is green
+    after applying the patch (covers FAIL_TO_PASS and PASS_TO_PASS in one shot)."""
+    data_root = os.environ.get("LFAH_DATA_DIR")
+    if not data_root:
+        raise RuntimeError("jest_oracle_eval needs LFAH_DATA_DIR (root holding "
+                           "instances/<instance_id>/{instance.json,repo})")
+    inst_dir = Path(data_root) / "instances" / instance_id
+    instance = json.loads((inst_dir / "instance.json").read_text())
+    src_repo = inst_dir / "repo"
+
+    # Work area must sit on a docker-mountable path (colima mounts $HOME). In real chain runs
+    # diff_path.parent is the instance dir (under $HOME); tests override via LFAH_JEST_WORKROOT.
+    work_root = Path(os.environ.get("LFAH_JEST_WORKROOT") or diff_path.parent) / "jest-runs" / run_id
+    work_root.mkdir(parents=True, exist_ok=True)
+    jestrepo = work_root / "jestrepo"
+    if jestrepo.exists():
+        shutil.rmtree(jestrepo)
+    shutil.copytree(src_repo, jestrepo)
+
+    # Guarantee the base state even if the canonical copy drifted, then apply the candidate patch.
+    base = instance.get("base_commit")
+    if base and (jestrepo / ".git").exists():
+        for c in (["checkout", "--quiet", "--force", base], ["reset", "--hard", "--quiet"],
+                  ["clean", "-fdq"]):
+            subprocess.run(["git", "-C", str(jestrepo), *c], capture_output=True, text=True)
+    diff_text = diff_path.read_text()
+    apply_rc, apply_err = 0, ""
+    if diff_text.strip():                       # empty diff -> no-op -> baseline (correctly unresolved)
+        ap = subprocess.run(["git", "-C", str(jestrepo), "apply", "--whitespace=nowarn",
+                             str(diff_path)], capture_output=True, text=True)
+        apply_rc, apply_err = ap.returncode, ap.stderr
+
+    out_json = jestrepo / ".jestout.json"
+    # One container invocation: install jest, run the suite, emit JSON. `; true` so a non-zero jest
+    # exit (failing tests) does not mask the JSON we parse for the verdict.
+    inner = ("npm install --silent --no-audit --no-fund && "
+             "npx --no-install jest --json --outputFile=.jestout.json --ci; true")
+    timeout_s = int(os.environ.get("LFAH_JEST_TIMEOUT_S", "600"))
+    env = dict(os.environ)
+    if os.environ.get("LFAH_JEST_DOCKER", "1") != "0":
+        image = os.environ.get("LFAH_JEST_IMAGE", "node:20-slim")
+        # Honor an explicit LFAH_DOCKER_HOST or an inherited DOCKER_HOST; otherwise leave it UNSET so the
+        # docker CLI falls back to its active context (e.g. colima) instead of a wrong /var/run default.
+        docker_host = os.environ.get("LFAH_DOCKER_HOST") or os.environ.get("DOCKER_HOST")
+        if docker_host:
+            env["DOCKER_HOST"] = docker_host
+        cmd = ["docker", "run", "--rm", "-v", f"{jestrepo}:/work", "-w", "/work", image,
+               "sh", "-lc", inner]
+    else:
+        cmd = ["sh", "-lc", inner]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(jestrepo), env=env,
+                           timeout=timeout_s)
+        rc, runout, runerr = r.returncode, r.stdout, r.stderr
+    except subprocess.TimeoutExpired as e:
+        rc, runout, runerr = 124, (e.stdout or ""), f"jest timed out after {timeout_s}s"
+
+    resolved, report = False, None
+    if out_json.exists():
+        report = str(out_json)
+        try:
+            j = json.loads(out_json.read_text())
+            resolved = (bool(j.get("success")) and j.get("numFailedTests", 1) == 0
+                        and j.get("numFailedTestSuites", 1) == 0 and j.get("numTotalTests", 0) >= 1)
+        except Exception:
+            resolved = False
+    (work_root / "eval.log").write_text(
+        f"apply_rc={apply_rc}\n{apply_err}\n--JEST STDOUT--\n{(runout or '')[-8000:]}"
+        f"\n--JEST STDERR--\n{(runerr or '')[-4000:]}")
+    return {"resolved": resolved, "report": report, "rc": rc}
+
+
+# ---------------------------------------------------------------------------
 # The capped 3-agent chain on ONE SWE-bench instance (planner -> executor -> oracle -> evaluator)
 # ---------------------------------------------------------------------------
 def reset_repo(repo: Path, base_commit: str):
@@ -572,6 +654,30 @@ def make_codefix_profile() -> dict:
         "oracle": {"kind": "deterministic", "wrapper": "eval_patch.sh", "fn": oracle_eval},
         "faithfulness_asserts": list(FAITHFULNESS_AXES),
     }
+
+
+def make_jest_profile() -> dict:
+    """Profile #1 for JavaScript -- code-fix graded by jest (the first non-Python oracle). Reuses the
+    SAME language-agnostic codefix specialist recipes (they drive a generic 'fix the failing test'
+    loop via Bash, with no pytest assumption); only the oracle/wrapper differ. Proves a new language
+    is an ADDITIVE profile, not an engine rewrite."""
+    return {
+        "category": "code-fix",
+        "language": "javascript",
+        "recipes": {"planner": "codefix-plan-specialist", "executor": "codefix-execute-specialist",
+                    "evaluator": "codefix-evaluate-specialist"},
+        "oracle": {"kind": "deterministic", "wrapper": "eval_patch_jest.sh", "fn": jest_oracle_eval},
+        "faithfulness_asserts": list(FAITHFULNESS_AXES),
+    }
+
+
+def select_profile(instance: dict) -> dict:
+    """The language axis: pick the code-fix profile for an instance's declared language. JavaScript
+    (language in {'javascript','js'}) -> the jest-graded profile; everything else (python, an absent
+    field, or any other value) -> the default pytest/swebench codefix profile. Existing Python
+    instances carry no 'language' field, so this is behavior-preserving for them."""
+    lang = str((instance or {}).get("language", "") or "").strip().lower()
+    return make_jest_profile() if lang in ("javascript", "js") else make_codefix_profile()
 
 
 def assert_profile_complete(profile: dict, role_models: dict, role_backends: dict) -> dict:
@@ -799,6 +905,7 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
                    "soft_error": he.get("soft_error")}
 
     return {"instance_id": iid, "mode": mode, "category": profile.get("category"),
+            "oracle_wrapper": profile["oracle"]["wrapper"],   # so faithfulness checks the REAL wrapper, not a hardcoded one
             "verdict": verdict, "final_resolved": final_resolved, "rounds_used": rounds_used,
             "iterations": iterations, "max_iters": MAX_ITERS, "precode_gate": precode,
             "lessons_lookup": {"topic": lessons_topic, "n_chars": len(lessons_lessons),
@@ -816,11 +923,12 @@ def assert_faithful(result: dict) -> dict:
     checks["evaluator_ne_executor"] = models["evaluator"] != models["executor"]
     exec_tool_uses, eval_tool_uses = 0, 0
     eval_ran_test = False
+    wrapper = result.get("oracle_wrapper", "eval_patch.sh")   # the profile's verifier (per-language)
     for rd in result["rounds"]:
         exec_tool_uses += len(rd["executor"]["tool_uses"])
         for tu in rd["evaluator"]["tool_uses"]:
             eval_tool_uses += 1
-            if tu["name"] == "Bash" and "eval_patch.sh" in json.dumps(tu.get("input", {})):
+            if tu["name"] == "Bash" and wrapper in json.dumps(tu.get("input", {})):
                 eval_ran_test = True
     checks["executor_used_tools"] = exec_tool_uses >= 1
     checks["evaluator_executed_real_test"] = eval_ran_test

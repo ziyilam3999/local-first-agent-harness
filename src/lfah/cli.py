@@ -126,7 +126,7 @@ def _run(args) -> int:
         os.environ["LFAH_CLOUD_HANDOFF"] = "1"
         os.environ["LFAH_CLOUD_HANDOFF_MODEL"] = args.cloud_fallback
 
-    profile = relay.make_codefix_profile()
+    profile = relay.select_profile(instance)   # language axis: javascript -> jest, else pytest codefix
     gate = relay.assert_profile_complete(profile, role_models, role_backends)
 
     print(f"=== lfah run: category={profile['category']} mode={args.mode} "
