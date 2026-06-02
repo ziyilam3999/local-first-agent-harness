@@ -52,6 +52,37 @@ def _cfg(*names: str, default: str) -> str:
             return v
     return default
 
+
+# Map of the load-bearing legacy names -> the modern equivalent, for a precise hint. Anything else
+# RK_-prefixed falls back to the RK_X -> LFAH_X rename convention.
+_DEPRECATED_RK_ENV = {
+    "RK_CLAUDE_TIMEOUT_S":     "LFAH_CLAUDE_TIMEOUT_S (or the cc-models.env SSOT LOCAL_ROLE_TIMEOUT_S)",
+    "RK_CLOUD_HANDOFF":        "LFAH_CLOUD_HANDOFF (or the SSOT LOCAL_FAIL_CLOUD_HANDOFF)",
+    "RK_CLOUD_HANDOFF_MODEL":  "LFAH_CLOUD_HANDOFF_MODEL (or the SSOT CLOUD_HANDOFF_MODEL)",
+    "RK_MOVE_BACKSTOP":        "LFAH_MOVE_BACKSTOP",
+}
+
+
+def _warn_deprecated_rk_env(env=None, out=None) -> list:
+    """Warn LOUDLY for any RK_* env var still set -- they are SILENTLY IGNORED post-#550.
+
+    The realkitchen->lfah rename retired every RK_* name; the engine now reads LFAH_* / cc-models.env
+    SSOT names. A typo'd RK_CLAUDE_TIMEOUT_S was the 2026-06-02 timeout confound: it was ignored, so the
+    run used the (then 900s) default instead of the 1800s SSOT -- a silent half-cap. A set-but-ignored
+    config var must never be silent. Returns the list of stale names found (for the test)."""
+    env = os.environ if env is None else env
+    out = sys.stderr if out is None else out
+    stale = sorted(n for n in env if n.startswith("RK_") and str(env.get(n, "")).strip())
+    for n in stale:
+        repl = _DEPRECATED_RK_ENV.get(n, "LFAH_" + n[3:])
+        print(f"[lfah] WARNING: {n} is set but IGNORED -- the engine reads {repl} "
+              f"(RK_* was retired in the #550 realkitchen->lfah rename). "
+              f"Set the modern name or source the cc-models.env SSOT.", file=out)
+    return stale
+
+
+_warn_deprecated_rk_env()  # fire once at import, against the real environment
+
 # Inlined code/diff extractor (kept for callers; the SHIP/ITERATE decision uses the deterministic
 # `decide_action` rule-table below, so there is no coordinator JSON to parse).
 def extract_python_code(text, last=False):
