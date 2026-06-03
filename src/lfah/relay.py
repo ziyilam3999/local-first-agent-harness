@@ -140,6 +140,17 @@ LOCAL_CHARS_PER_TOKEN = float(os.environ.get("LFAH_LOCAL_CHARS_PER_TOKEN", "3.24
 CLOUD_HANDOFF       = _cfg("LFAH_CLOUD_HANDOFF", "LOCAL_FAIL_CLOUD_HANDOFF", default="0") != "0"
 CLOUD_HANDOFF_MODEL = _cfg("LFAH_CLOUD_HANDOFF_MODEL", "CLOUD_HANDOFF_MODEL", default="sonnet")
 
+# LOOP SIGNAL — what drives the chain's SHIP/ITERATE decision (and the cloud-handoff trigger):
+#   "oracle"    = the harness docker oracle's `resolved` (GROUND TRUTH). NOT production-realizable
+#                 (prod has no hidden gold grader); this is the oracle-in-the-loop UPPER BOUND.
+#   "evaluator" = the chain's own EVALUATOR verdict (PASS / ISSUE-PLAN / ISSUE-CODE) — a fallible MODEL
+#                 judgment, which IS what a deployed system has. The oracle is then used ONLY to GRADE at
+#                 the end (recorded per round as truth for skill-evolve), never to drive the loop.
+# Default "oracle" preserves historical behavior; the production-faithful runs set LFAH_LOOP_SIGNAL=evaluator.
+LOOP_SIGNAL = (_cfg("LFAH_LOOP_SIGNAL", "LOOP_SIGNAL", default="oracle") or "oracle").lower()
+if LOOP_SIGNAL not in ("oracle", "evaluator"):
+    LOOP_SIGNAL = "oracle"
+
 # Tools a headless chain role must NEVER be able to invoke. `--allowedTools` is an ALLOW set, but it
 # does NOT gate interactive/control tools that the CLI exposes by default: even when AskUserQuestion is
 # absent from --allowedTools, a role still calls it and the CLI executes it (auto-dismissed in -p mode),
@@ -699,25 +710,52 @@ def lessons_find(topic: str) -> str:
         return ""
 
 
-def decide_action(*, oracle_resolved: bool, eval_text: str, n1_left: int, n2_left: int) -> dict:
+def classify_eval_verdict(eval_text: str) -> str:
+    """Parse the evaluator's verdict into PASS | ISSUE-PLAN | ISSUE-CODE | UNCLEAR. Prefers an explicit
+    machine line `VERDICT: <x>` (last wins); falls back to a tolerant scan. UNCLEAR is treated as
+    not-PASS by the loop (conservative: iterate/escalate rather than silently ship)."""
+    et = (eval_text or "").upper()
+    m = re.findall(r"VERDICT:\s*(PASS|ISSUE-PLAN|ISSUE-CODE)", et)
+    if m:
+        return m[-1]
+    if "ISSUE-PLAN" in et:
+        return "ISSUE-PLAN"
+    if "ISSUE-CODE" in et:
+        return "ISSUE-CODE"
+    # a standalone PASS token (not PASS_TO_PASS / BYPASS / PASSED) with no ISSUE flagged
+    if re.search(r"(^|[^A-Z_])PASS([^A-Z_]|$)", et) and "ISSUE" not in et:
+        return "PASS"
+    return "UNCLEAR"
+
+
+def decide_action(*, oracle_resolved: bool, eval_text: str, n1_left: int, n2_left: int,
+                  loop_signal: str = "oracle") -> dict:
     """The folded coordinator rule-table (the conductor is the free Python loop, no LLM).
 
-    Ground truth is the docker oracle; the evaluator's verdict only routes the KIND of iterate:
-      resolved                      -> SHIP
-      unresolved + ISSUE-PLAN + N2  -> ITERATE-REPLAN   (the plan was wrong; regenerate it)
-      unresolved + exec budget      -> ITERATE-EXECUTOR (the code was wrong; fix it)
-      unresolved + only replan left -> ITERATE-REPLAN
-      unresolved + no budget        -> SHIP (loop labels it SHIP-CAPPED)
-    An unresolved oracle can NEVER silently SHIP while iteration budget remains."""
-    if oracle_resolved:
-        return {"action": "SHIP", "reason": "oracle_resolved"}
-    et = (eval_text or "").upper()
-    if "ISSUE-PLAN" in et and n2_left > 0:
-        return {"action": "ITERATE-REPLAN", "reason": "oracle_unresolved+issue_plan"}
+    The SHIP gate depends on loop_signal:
+      oracle    -> SHIP iff the docker oracle says resolved (GROUND TRUTH; oracle-in-the-loop upper bound).
+      evaluator -> SHIP iff the EVALUATOR verdict is PASS (a fallible model judgment; production-faithful).
+                   The oracle still GRADES at the end but does NOT drive this decision.
+    In BOTH modes the evaluator's verdict routes the KIND of iterate (ISSUE-PLAN -> replan; else executor):
+      pass(by the active signal)    -> SHIP
+      not-pass + ISSUE-PLAN + N2    -> ITERATE-REPLAN   (the plan was wrong; regenerate it)
+      not-pass + exec budget        -> ITERATE-EXECUTOR (the code was wrong; fix it)
+      not-pass + only replan left   -> ITERATE-REPLAN
+      not-pass + no budget          -> SHIP (loop labels it SHIP-CAPPED)
+    A not-pass can NEVER silently SHIP while iteration budget remains."""
+    verdict = classify_eval_verdict(eval_text)
+    if loop_signal == "evaluator":
+        passed, pass_reason = (verdict == "PASS"), "evaluator_pass"
+    else:
+        passed, pass_reason = oracle_resolved, "oracle_resolved"
+    if passed:
+        return {"action": "SHIP", "reason": pass_reason}
+    if verdict == "ISSUE-PLAN" and n2_left > 0:
+        return {"action": "ITERATE-REPLAN", "reason": f"{loop_signal}_unresolved+issue_plan"}
     if n1_left > 0:
-        return {"action": "ITERATE-EXECUTOR", "reason": "oracle_unresolved"}
+        return {"action": "ITERATE-EXECUTOR", "reason": f"{loop_signal}_unresolved"}
     if n2_left > 0:
-        return {"action": "ITERATE-REPLAN", "reason": "oracle_unresolved+exec_budget_spent"}
+        return {"action": "ITERATE-REPLAN", "reason": f"{loop_signal}_unresolved+exec_budget_spent"}
     return {"action": "SHIP", "reason": "budget_exhausted"}
 
 
@@ -913,20 +951,23 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
             f"    bash {eval_wrapper} {iid}\n"
             f"It runs the canonical SWE-bench test ({f2p}) in the correct docker env and prints "
             f"RESOLVED=true|false. Base your code verdict on that actual output. Then output your "
-            f"PASS / ISSUE-PLAN / ISSUE-CODE verdict per your manual.")
+            f"PASS / ISSUE-PLAN / ISSUE-CODE verdict per your manual. END with exactly one line: "
+            f"`VERDICT: PASS` or `VERDICT: ISSUE-PLAN` or `VERDICT: ISSUE-CODE`.")
         ev = run_role(spec=specs["evaluator"], model=role_models["evaluator"],
                       backend=role_backends["evaluator"], user_prompt=eval_prompt,
                       cwd=repo, max_turns=MAX_TURNS_EVAL, dry_run=dry_run)
         rounds_used += 1
         last_eval_text = ev["response"]
+        eval_verdict = classify_eval_verdict(last_eval_text)   # the model's call (drives loop in evaluator mode)
 
         # ---- orchestrator decision (deterministic rule-table; no coordinator LLM) ----
+        # SHIP gate = oracle truth (oracle mode) OR evaluator verdict (evaluator mode, production-faithful).
         action = decide_action(oracle_resolved=oracle["resolved"], eval_text=last_eval_text,
-                               n1_left=N1, n2_left=N2)
+                               n1_left=N1, n2_left=N2, loop_signal=LOOP_SIGNAL)
         rounds.append({"iteration": iteration, "planner": p if iteration == 0 else None,
-                       "executor": e, "evaluator": ev,
+                       "executor": e, "evaluator": ev, "evaluator_verdict": eval_verdict,
                        "action": action, "oracle": oracle, "diff_bytes": len(last_diff),
-                       "diff_text": last_diff})   # persist the ACTUAL patch the executor produced
+                       "diff_text": last_diff})   # persist the ACTUAL patch + the evaluator's structured verdict
 
         act = action.get("action", "SHIP")
         # Test hook: force the first `force_iterate` iterations to ITERATE (deterministic smoke).
@@ -934,9 +975,12 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
             act = "ITERATE-EXECUTOR" if N1 > 0 else ("ITERATE-REPLAN" if N2 > 0 else "SHIP")
         # IMPROVEMENT A: a LOCAL executor that TIMED OUT or got STUCK is NOT retried on the same local
         # model -- re-running re-fails and a capped role is the failure tail, not a slow solve. Fail fast
-        # -> SHIP-CAPPED (unresolved). The post-loop cloud handoff (improvement C) may then rescue it.
+        # -> SHIP-CAPPED. The post-loop cloud handoff (improvement C) may then rescue it. "passed_now" uses
+        # the ACTIVE loop signal (oracle truth / evaluator verdict) so the fail-fast never consults the
+        # oracle in evaluator mode.
+        passed_now = (eval_verdict == "PASS") if LOOP_SIGNAL == "evaluator" else oracle["resolved"]
         if (role_backends["executor"] == "local" and e.get("soft_error") in ("timeout", "stuck")
-                and not oracle["resolved"]):
+                and not passed_now):
             rounds[-1]["action"] = {"action": "SHIP",
                                     "reason": f"local_executor_{e.get('soft_error')}_no_retry"}
             verdict = "SHIP-CAPPED"
@@ -969,10 +1013,20 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
     # LFAH_CLOUD_HANDOFF=1, hand the SAME plan to a CLOUD model (escalate the hard bug the free local tier
     # can't do). final_resolved (local's honest result) is UNCHANGED; the cloud outcome lands in a SEPARATE
     # `handoff` field (model + resolved + wall + $).
+    # Trigger (production-realizable — never the oracle):
+    #   oracle mode    -> local executor failed fast (timeout|stuck) AND not oracle-resolved.
+    #   evaluator mode -> the local chain ENDED WITHOUT an evaluator-PASS (exec failure OR the chain's own
+    #                     reviewer was never satisfied). This is the deployable signal: escalate the bug the
+    #                     free local tier couldn't convince its evaluator it had fixed.
     handoff = None
     le = rounds[-1].get("executor") or {}
-    if (CLOUD_HANDOFF and not dry_run and role_backends["executor"] == "local"
-            and le.get("soft_error") in ("timeout", "stuck") and not rounds[-1]["oracle"]["resolved"]):
+    exec_failed_fast = le.get("soft_error") in ("timeout", "stuck")
+    last_verdict = rounds[-1].get("evaluator_verdict", "UNCLEAR")
+    if LOOP_SIGNAL == "evaluator":
+        handoff_trigger = exec_failed_fast or (last_verdict != "PASS")
+    else:
+        handoff_trigger = exec_failed_fast and not rounds[-1]["oracle"]["resolved"]
+    if CLOUD_HANDOFF and not dry_run and role_backends["executor"] == "local" and handoff_trigger:
         reset_repo(repo, instance["base_commit"])           # clean slate: measure cloud's standalone ability
         handoff_prompt = (
             f"TASK (repo: {instance['repo']}):\n\n{problem}\n\n"
@@ -984,7 +1038,8 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
         rounds_used += 1
         h_diff = git_diff(repo); (repo.parent / "patch.handoff.diff").write_text(h_diff)
         h_oracle = oracle_fn(iid, repo.parent / "patch.handoff.diff", f"rk-{iid}-handoff-{int(time.time())}")
-        handoff = {"trigger": le.get("soft_error"), "model_requested": CLOUD_HANDOFF_MODEL,
+        handoff = {"trigger": (le.get("soft_error") or (f"evaluator_{last_verdict}" if LOOP_SIGNAL == "evaluator" else "unresolved")),
+                   "model_requested": CLOUD_HANDOFF_MODEL,
                    "model_resolved": he.get("model_resolved"), "backend": "cloud",
                    "resolved": bool(h_oracle["resolved"]), "wall_s": round(he.get("wall_s", 0.0), 1),
                    "cost_usd": he.get("cost_usd"), "output_tps": he.get("output_tps"),
@@ -993,6 +1048,7 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
                    "soft_error": he.get("soft_error")}
 
     return {"instance_id": iid, "mode": mode, "category": profile.get("category"),
+            "loop_signal": LOOP_SIGNAL,                        # which signal drove SHIP/ITERATE (oracle | evaluator)
             "oracle_wrapper": profile["oracle"]["wrapper"],   # so faithfulness checks the REAL wrapper, not a hardcoded one
             "verdict": verdict, "final_resolved": final_resolved, "rounds_used": rounds_used,
             "iterations": iterations, "max_iters": MAX_ITERS, "precode_gate": precode,
