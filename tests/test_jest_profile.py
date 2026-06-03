@@ -57,6 +57,47 @@ def test_select_profile_language_axis():
         assert relay.select_profile(inst)["oracle"]["fn"] is relay.oracle_eval
 
 
+def _report(*files):
+    """Build a synthetic jest --json report. Each file is (path, suite_status, [(title, status), ...])."""
+    return {"testResults": [
+        {"name": f"/work/{path}", "status": ss,
+         "assertionResults": [{"title": t, "fullName": t, "ancestorTitles": [], "status": s}
+                              for (t, s) in asserts]}
+        for (path, ss, asserts) in files]}
+
+
+def test_jest_targeted_resolve_both_ends():
+    """The new targeted grader's own correctness (NO docker). FAIL_TO_PASS must pass + PASS_TO_PASS must
+    stay green; UNRELATED failures elsewhere are ignored; file-level and file:test-level ids both work."""
+    rep = _report(
+        ("test/plugin/isToday.test.js", "passed", [("works", "passed")]),          # F2P (file-level) -> pass
+        ("test/get-set.test.js", "passed", [("Add Time days (DST)", "passed")]),    # P2P (test-level) -> pass
+        ("test/unrelated.test.js", "failed", [("pre-existing flake", "failed")]),   # UNRELATED -> must be ignored
+    )
+    f2p = ["test/plugin/isToday.test.js"]
+    p2p = ["test/get-set.test.js:Add Time days (DST)"]
+
+    g = relay.jest_targeted_resolve(rep, f2p, p2p)
+    assert g["resolved"] is True and g["f2p_pass"] == 1 and g["p2p_pass"] == 1  # unrelated failure ignored
+
+    # F2P still failing -> NOT resolved
+    bad_f2p = _report(("test/plugin/isToday.test.js", "failed", [("works", "failed")]),
+                      ("test/get-set.test.js", "passed", [("Add Time days (DST)", "passed")]))
+    assert relay.jest_targeted_resolve(bad_f2p, f2p, p2p)["resolved"] is False
+
+    # P2P regressed -> NOT resolved (no-regression guard)
+    reg = _report(("test/plugin/isToday.test.js", "passed", [("works", "passed")]),
+                  ("test/get-set.test.js", "failed", [("Add Time days (DST)", "failed")]))
+    assert relay.jest_targeted_resolve(reg, f2p, p2p)["resolved"] is False
+
+    # F2P file never ran (candidate broke compile) -> NOT resolved
+    assert relay.jest_targeted_resolve(_report(("test/get-set.test.js", "passed",
+                                                [("Add Time days (DST)", "passed")])), f2p, p2p)["resolved"] is False
+
+    # empty F2P can never read as resolved (degenerate spec guard)
+    assert relay.jest_targeted_resolve(rep, [], p2p)["resolved"] is False
+
+
 def test_existing_python_path_unchanged():
     """AC5 (unit): an instance with no language field is byte-for-byte the old codefix profile."""
     chosen = relay.select_profile({"instance_id": "pytest-dev__pytest-1"})
