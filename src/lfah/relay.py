@@ -455,7 +455,11 @@ def run_role(*, spec: dict, model: str, backend: str, user_prompt: str,
             "input_tokens": in_tok, "output_tokens": out_tok,
             "cache_read_input_tokens": cache_read, "cache_creation_input_tokens": cache_creation,
             "duration_api_ms": duration_api_ms, "duration_ms": duration_ms,
-            "output_tps": output_tps, "tps_source": tps_source, "gen_chars": gen_chars,
+            # tps_kind=effective_wall: output_tps is tokens/WALL (incl prefill + model-load + tool gaps),
+            # NOT raw generation speed. For raw local-model TPS use the run-level Ollama reference
+            # (eval_count/eval_duration). See feedback_agentic_harness_tps_capture_raw_reference.
+            "output_tps": output_tps, "tps_kind": "effective_wall", "tps_source": tps_source,
+            "gen_chars": gen_chars,
             "model_resolved": model_resolved, "soft_error": soft_error,
             "stuck_evidence": stuck_evidence}   # proof when soft_error=="stuck" (None otherwise)
 
@@ -1017,7 +1021,8 @@ def compute_telemetry(result: dict) -> dict:
                    "backend": rb.get(rk)} for rk, agg in per_role.items()}
     return {
         "models": models,
-        "performance": {rk: {"output_tps": agg["output_tps"], "tps_source": agg.get("tps_source", "api"),
+        "performance": {rk: {"output_tps": agg["output_tps"], "tps_kind": "effective_wall",
+                             "tps_source": agg.get("tps_source", "api"),
                              "wall_s": round(agg["wall_s"], 1), "gen_chars": agg.get("gen_chars", 0),
                              "model_requested": rm.get(rk), "model_resolved": agg.get("model_resolved", ""),
                              "backend": rb.get(rk)}
