@@ -537,6 +537,21 @@ def jest_oracle_eval(instance_id: str, diff_path: Path, run_id: str) -> dict:
                              str(diff_path)], capture_output=True, text=True)
         apply_rc, apply_err = ap.returncode, ap.stderr
 
+    # Tamper-hardening: re-impose the canonical graded test files from base_commit, discarding any
+    # candidate edits to them. The task is to fix SOURCE; a candidate that weakens/deletes the test
+    # to go green must not be rewarded. base_commit already carries the canonical (failing) test, so
+    # `git checkout <base> -- <test_files>` restores it. No-op when the candidate left tests alone
+    # (the honest case), and skipped for instances that declare no test_files (behavior-preserving).
+    test_files = instance.get("test_files") or []
+    reimpose_rc, reimpose_err = None, ""
+    if base and test_files and (jestrepo / ".git").exists():
+        ci = subprocess.run(["git", "-C", str(jestrepo), "checkout", base, "--", *test_files],
+                            capture_output=True, text=True)
+        reimpose_rc, reimpose_err = ci.returncode, ci.stderr
+        # A non-zero rc means a test_file path is absent at base_commit (corpus/config bug): the
+        # re-imposition silently no-ops and the grader reverts to gameable behavior. Surface it
+        # loudly in eval.log so it is caught, rather than degrading the integrity check in silence.
+
     out_json = jestrepo / ".jestout.json"
     # One container invocation: install jest, run the suite, emit JSON. `; true` so a non-zero jest
     # exit (failing tests) does not mask the JSON we parse for the verdict.
@@ -572,9 +587,10 @@ def jest_oracle_eval(instance_id: str, diff_path: Path, run_id: str) -> dict:
         except Exception:
             resolved = False
     (work_root / "eval.log").write_text(
-        f"apply_rc={apply_rc}\n{apply_err}\n--JEST STDOUT--\n{(runout or '')[-8000:]}"
+        f"apply_rc={apply_rc}\n{apply_err}\n"
+        f"reimpose_rc={reimpose_rc}\n{reimpose_err}\n--JEST STDOUT--\n{(runout or '')[-8000:]}"
         f"\n--JEST STDERR--\n{(runerr or '')[-4000:]}")
-    return {"resolved": resolved, "report": report, "rc": rc}
+    return {"resolved": resolved, "report": report, "rc": rc, "reimpose_rc": reimpose_rc}
 
 
 # ---------------------------------------------------------------------------

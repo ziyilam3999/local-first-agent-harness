@@ -4,5 +4,6 @@
   "repo": "local/jest-fixture-sum",
   "problem_statement": "sum(a, b) returns the difference instead of the sum, so the arithmetic tests in sum.test.js fail. Fix sum() so it adds its two arguments.",
   "FAIL_TO_PASS": "sum.test.js",
+  "test_files": ["sum.test.js"],
   "gold_patch": "gold.patch"
 }
