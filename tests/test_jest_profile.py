@@ -128,6 +128,47 @@ def test_eval_patch_jest_wrapper_prints_resolved(tmp_path):
         shutil.rmtree(work, ignore_errors=True)
 
 
+@pytest.mark.skipif(not _docker_ok(), reason="jest oracle needs a reachable docker daemon")
+def test_jest_oracle_reimposes_graded_test_against_tampering(tmp_path):
+    """AC6 (#607): a candidate that NEUTERS the graded test (rewrites it to a trivially-passing
+    no-op) WITHOUT fixing the source must NOT be scored resolved. The oracle re-imposes the
+    canonical test from base_commit, so grader-gaming is defeated. Contrast: without re-imposition
+    the neutered suite would go green and falsely resolve. Honest gold fix still resolves."""
+    repo_root = Path(relay.__file__).resolve().parents[2]
+    work = Path(tempfile.mkdtemp(prefix=".jest-tamper-testrun-", dir=repo_root))
+    try:
+        ids = fixt.materialize_all(work)
+        iid = ids[0]                                    # jest-fixture__sum-1, test_files=[sum.test.js]
+        inst = json.loads((work / "instances" / iid / "instance.json").read_text())
+        assert inst.get("test_files"), "fixture must declare test_files for the hardening to engage"
+        tfile = inst["test_files"][0]
+        checkout = work / "instances" / iid / "repo"
+
+        # craft a TAMPER candidate: rewrite the graded test to a no-op pass, NO source fix.
+        (checkout / tfile).write_text("test('neutered', () => { expect(1).toBe(1); });\n")
+        tamper = subprocess.run(["git", "-C", str(checkout), "diff"], capture_output=True,
+                                text=True, check=True).stdout
+        subprocess.run(["git", "-C", str(checkout), "checkout", "--", "."], check=True)  # restore
+        assert tfile in tamper and "neutered" in tamper, "tamper diff did not target the test file"
+
+        env_backup = os.environ.get("LFAH_DATA_DIR"), os.environ.get("LFAH_JEST_WORKROOT")
+        os.environ["LFAH_DATA_DIR"] = str(work)
+        os.environ["LFAH_JEST_WORKROOT"] = str(work / "_runs")
+        try:
+            tdiff = work / f"tamper-{iid}.diff"; tdiff.write_text(tamper)
+            res_tamper = relay.jest_oracle_eval(iid, tdiff, f"tamper-{iid}")
+            assert res_tamper["resolved"] is False, f"tamper wrongly resolved {iid}: {res_tamper}"
+
+            gold = work / "instances" / iid / "gold.patch"
+            res_gold = relay.jest_oracle_eval(iid, gold, f"gold2-{iid}")
+            assert res_gold["resolved"] is True, f"gold patch did not resolve {iid}: {res_gold}"
+        finally:
+            for k, v in zip(("LFAH_DATA_DIR", "LFAH_JEST_WORKROOT"), env_backup):
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 if __name__ == "__main__":
     # convenience: `python tests/test_jest_profile.py` materializes + dumps the fixtures for inspection
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(tempfile.mkdtemp(prefix="jestfix-"))
