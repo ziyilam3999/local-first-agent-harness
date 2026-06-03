@@ -98,6 +98,39 @@ def test_jest_targeted_resolve_both_ends():
     assert relay.jest_targeted_resolve(rep, [], p2p)["resolved"] is False
 
 
+def test_classify_eval_verdict():
+    c = relay.classify_eval_verdict
+    assert c("blah\nVERDICT: PASS") == "PASS"
+    assert c("VERDICT: ISSUE-PLAN") == "ISSUE-PLAN"
+    assert c("reasons...\nVERDICT: ISSUE-CODE\n") == "ISSUE-CODE"
+    assert c("the fix looks right, PASS") == "PASS"                 # free-form fallback
+    assert c("ISSUE-CODE: off-by-one") == "ISSUE-CODE"
+    assert c("P2P 56/56 PASS_TO_PASS all green") == "UNCLEAR"       # PASS_TO_PASS must NOT read as PASS
+    assert c("") == "UNCLEAR"
+
+
+def test_decide_action_loop_signal():
+    """The core production-fidelity switch: with oracle UNRESOLVED but the evaluator saying PASS,
+    oracle-mode keeps ITERATING (it knows the truth) while evaluator-mode SHIPS (it trusts its reviewer)."""
+    # oracle resolved -> SHIP in oracle mode regardless of evaluator
+    assert relay.decide_action(oracle_resolved=True, eval_text="VERDICT: ISSUE-CODE",
+                               n1_left=1, n2_left=1, loop_signal="oracle")["action"] == "SHIP"
+    # THE CONTRAST — oracle says unresolved, evaluator says PASS:
+    o = relay.decide_action(oracle_resolved=False, eval_text="VERDICT: PASS",
+                            n1_left=1, n2_left=1, loop_signal="oracle")
+    e = relay.decide_action(oracle_resolved=False, eval_text="VERDICT: PASS",
+                            n1_left=1, n2_left=1, loop_signal="evaluator")
+    assert o["action"].startswith("ITERATE") and e == {"action": "SHIP", "reason": "evaluator_pass"}
+    # evaluator mode, ISSUE-PLAN + replan budget -> ITERATE-REPLAN; UNCLEAR -> not a ship
+    assert relay.decide_action(oracle_resolved=False, eval_text="VERDICT: ISSUE-PLAN",
+                               n1_left=0, n2_left=1, loop_signal="evaluator")["action"] == "ITERATE-REPLAN"
+    assert relay.decide_action(oracle_resolved=False, eval_text="hmm not sure",
+                               n1_left=1, n2_left=0, loop_signal="evaluator")["action"] == "ITERATE-EXECUTOR"
+    # no budget -> capped ship in both modes
+    assert relay.decide_action(oracle_resolved=False, eval_text="VERDICT: ISSUE-CODE",
+                               n1_left=0, n2_left=0, loop_signal="evaluator")["reason"] == "budget_exhausted"
+
+
 def test_existing_python_path_unchanged():
     """AC5 (unit): an instance with no language field is byte-for-byte the old codefix profile."""
     chosen = relay.select_profile({"instance_id": "pytest-dev__pytest-1"})
