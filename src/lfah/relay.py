@@ -508,9 +508,66 @@ def oracle_eval(instance_id: str, diff_path: Path, run_id: str) -> dict:
 # resolve everything from the id + a data-root env. Hermetic in docker by default (parity with the
 # pytest oracle); LFAH_JEST_DOCKER=0 runs jest on host node for a fast dev loop.
 # ---------------------------------------------------------------------------
+def _jest_suite_index(report: dict) -> dict:
+    """Index a jest `--json` report by test FILE: {file_path: {"status", "asserts":[{full,title,status}]}}.
+    `name` (jest <30) / `testFilePath` (jest >=30) is an ABSOLUTE path inside the container; we match by
+    suffix against the corpus's repo-relative test ids."""
+    idx = {}
+    for tr in report.get("testResults", []) or []:
+        name = tr.get("name") or tr.get("testFilePath") or ""
+        asserts = []
+        for a in tr.get("assertionResults", []) or []:
+            full = a.get("fullName") or " ".join((a.get("ancestorTitles") or []) +
+                                                  [a.get("title") or ""]).strip()
+            asserts.append({"full": full, "title": a.get("title") or "", "status": a.get("status")})
+        idx[name] = {"status": tr.get("status"), "asserts": asserts}
+    return idx
+
+
+def _jest_id_passes(idx: dict, test_id: str) -> bool:
+    """Does one Multi-SWE-bench test id pass in the report? `file.test.js` (the whole suite must pass)
+    or `file.test.js:Some test name` (that one assertion must pass). File matched by path suffix;
+    test name matched against the assertion's fullName/title (exact, suffix, or contained)."""
+    file_rel, _, testname = test_id.partition(":")
+    entry = None
+    for name, v in idx.items():
+        if name == file_rel or name.endswith("/" + file_rel) or name.endswith(file_rel):
+            entry = v
+            break
+    if entry is None:
+        return False                                    # file never ran (e.g. candidate broke compile)
+    if not testname:
+        return entry["status"] == "passed"              # file-level: the whole suite must be green
+    for a in entry["asserts"]:                           # test-level: that assertion must be passed
+        if a["status"] == "passed" and (a["full"] == testname or a["title"] == testname
+                                        or a["full"].endswith(testname) or testname in a["full"]):
+            return True
+    return False
+
+
+def jest_targeted_resolve(report: dict, f2p: list, p2p: list) -> dict:
+    """The Multi-SWE-bench grading rule: resolved IFF every FAIL_TO_PASS test now passes AND every
+    PASS_TO_PASS test still passes -- judged ONLY on the declared tests, so UNRELATED pre-existing
+    failures elsewhere in the suite do not count against the candidate (the flaw whole-suite-green had:
+    it conflated unrelated noise with the fix AND silently biased the corpus toward trivially-clean
+    repos). Requires >=1 F2P so an empty/degenerate spec can never read as resolved.
+    SHARED by the run-time oracle (jest_oracle_eval) and the corpus self-validator -- one rule, so an
+    instance that 'validates' is graded by the identical logic at run time."""
+    f2p = list(f2p or []); p2p = list(p2p or [])
+    idx = _jest_suite_index(report)
+    f2p_fail = [t for t in f2p if not _jest_id_passes(idx, t)]
+    p2p_fail = [t for t in p2p if not _jest_id_passes(idx, t)]
+    resolved = (len(f2p) >= 1 and not f2p_fail and not p2p_fail)
+    return {"resolved": resolved, "f2p_total": len(f2p), "f2p_pass": len(f2p) - len(f2p_fail),
+            "p2p_total": len(p2p), "p2p_pass": len(p2p) - len(p2p_fail),
+            "failed_ids": (f2p_fail + p2p_fail)[:25]}
+
+
 def jest_oracle_eval(instance_id: str, diff_path: Path, run_id: str) -> dict:
-    """Score a candidate patch against a JS/jest instance. resolved == the WHOLE suite is green
-    after applying the patch (covers FAIL_TO_PASS and PASS_TO_PASS in one shot)."""
+    """Score a candidate patch against a JS/jest instance. resolved == the instance's FAIL_TO_PASS tests
+    pass AND its PASS_TO_PASS tests stay green (Multi-SWE-bench targeted grading via
+    jest_targeted_resolve). Falls back to whole-suite-green only for legacy instances that declare no
+    F2P/P2P lists (e.g. the unit fixtures), so older corpora keep working."""
     data_root = os.environ.get("LFAH_DATA_DIR")
     if not data_root:
         raise RuntimeError("jest_oracle_eval needs LFAH_DATA_DIR (root holding "
@@ -581,20 +638,31 @@ def jest_oracle_eval(instance_id: str, diff_path: Path, run_id: str) -> dict:
     except subprocess.TimeoutExpired as e:
         rc, runout, runerr = 124, (e.stdout or ""), f"jest timed out after {timeout_s}s"
 
-    resolved, report = False, None
+    # Targeted grading (Multi-SWE-bench): resolved IFF the instance's FAIL_TO_PASS tests pass AND its
+    # PASS_TO_PASS tests stay green. f2p/p2p are repo-relative test ids (file or file:testname). Legacy
+    # instances that declare neither fall back to whole-suite-green so older corpora/fixtures still grade.
+    f2p = instance.get("f2p_tests") or []
+    p2p = instance.get("p2p_tests") or []
+    resolved, report, grade = False, None, None
     if out_json.exists():
         report = str(out_json)
         try:
             j = json.loads(out_json.read_text())
-            resolved = (bool(j.get("success")) and j.get("numFailedTests", 1) == 0
-                        and j.get("numFailedTestSuites", 1) == 0 and j.get("numTotalTests", 0) >= 1)
+            if f2p:
+                grade = jest_targeted_resolve(j, f2p, p2p)
+                resolved = grade["resolved"]
+            else:                                       # legacy: no F2P/P2P -> whole-suite-green
+                resolved = (bool(j.get("success")) and j.get("numFailedTests", 1) == 0
+                            and j.get("numFailedTestSuites", 1) == 0 and j.get("numTotalTests", 0) >= 1)
         except Exception:
             resolved = False
     (work_root / "eval.log").write_text(
         f"apply_rc={apply_rc}\n{apply_err}\n"
-        f"reimpose_rc={reimpose_rc}\n{reimpose_err}\n--JEST STDOUT--\n{(runout or '')[-8000:]}"
+        f"reimpose_rc={reimpose_rc}\n{reimpose_err}\n"
+        f"grade_mode={'targeted-f2p-p2p' if f2p else 'whole-suite-green'} grade={grade}\n"
+        f"--JEST STDOUT--\n{(runout or '')[-8000:]}"
         f"\n--JEST STDERR--\n{(runerr or '')[-4000:]}")
-    return {"resolved": resolved, "report": report, "rc": rc, "reimpose_rc": reimpose_rc}
+    return {"resolved": resolved, "report": report, "rc": rc, "reimpose_rc": reimpose_rc, "grade": grade}
 
 
 # ---------------------------------------------------------------------------
