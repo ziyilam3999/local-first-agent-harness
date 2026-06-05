@@ -471,7 +471,10 @@ def run_role(*, spec: dict, model: str, backend: str, user_prompt: str,
             # (eval_count/eval_duration). See feedback_agentic_harness_tps_capture_raw_reference.
             "output_tps": output_tps, "tps_kind": "effective_wall", "tps_source": tps_source,
             "gen_chars": gen_chars,
-            "model_resolved": model_resolved, "soft_error": soft_error,
+            "model_resolved": model_resolved,
+            # #623: a provider rate-limit/quota notice returned in place of real output is an INFRA error,
+            # flagged distinctly so run_chain can abort (INFRA-SKIP) instead of burning the iteration budget.
+            "soft_error": ("rate_limit" if _PROVIDER_LIMIT_RE.search(final_text or "") else soft_error),
             "stuck_evidence": stuck_evidence}   # proof when soft_error=="stuck" (None otherwise)
 
 
@@ -845,6 +848,33 @@ def assert_profile_complete(profile: dict, role_models: dict, role_backends: dic
             "n_distinct_local_models": len(local_models)}
 
 
+# --- #623: provider rate-limit / quota -> INFRA-SKIP (an infra failure, NOT a chain/model failure) -----
+# A Max session-limit / API quota window makes the CLI return an ERROR STRING in place of real model
+# output (cost 0, ~1 turn). Treating that as a model RESPONSE burns the whole iteration budget on garbage
+# then SHIP-CAPs (the 2026-06-04 #601 incident: a session-limit window poisoned 4 instances). Detect it,
+# abort the instance as INFRA-SKIP, and STOP iterating. (The analyzer also excludes such cells downstream.)
+_PROVIDER_LIMIT_RE = re.compile(
+    r"you'?ve hit your (?:usage|session|plan) limit|\b(?:session|usage) limit\b|"
+    r"\brate.?limit(?:ed|ing)?\b|quota (?:exceeded|exhausted|reached)|"
+    r"429 too many|overloaded_error", re.I)
+
+
+def provider_limit_hit(resp) -> bool:
+    """True iff a role response is a PROVIDER rate-limit/quota notice (an error string returned in place
+    of real model output) -- an INFRA failure, NOT a chain/model failure. See #623."""
+    if not isinstance(resp, dict):
+        return False
+    return bool(_PROVIDER_LIMIT_RE.search(resp.get("response") or ""))
+
+
+def _first_limit(**roles):
+    """Return (role, snippet) for the first role whose response is a provider-limit notice, else None."""
+    for role, resp in roles.items():
+        if provider_limit_hit(resp):
+            return role, (resp.get("response") or "").strip().replace("\n", " ")[:160]
+    return None
+
+
 def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: dict,
               mode: str, profile: dict, dry_run: bool = False) -> dict:
     """role_models/role_backends: per-role {planner,executor,evaluator}. `profile` is the loaded
@@ -875,6 +905,20 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
     lessons_block = ("\n\nRELEVANT PRIOR LESSONS (factor these into your review):\n"
                    + (lessons_lessons if lessons_lessons else "(none on record for this topic)") + "\n")
 
+    def _infra_skip_result(role, snippet, precode_obj):
+        # #623: a provider rate-limit aborted this instance -> INFRA-SKIP. final_resolved=None (NOT False:
+        # it is not a model failure), verdict="INFRA-SKIP", flagged so the runner/analyzer never count it.
+        return {"instance_id": iid, "mode": mode, "category": profile.get("category"),
+                "loop_signal": LOOP_SIGNAL, "oracle_wrapper": profile["oracle"]["wrapper"],
+                "verdict": "INFRA-SKIP", "final_resolved": None,
+                "infra_skip": True, "infra_reason": f"provider_rate_limit:{role}", "infra_snippet": snippet,
+                "rounds_used": rounds_used, "iterations": len(rounds), "max_iters": None,
+                "precode_gate": precode_obj,
+                "lessons_lookup": {"topic": lessons_topic, "n_chars": len(lessons_lessons),
+                                   "injected": bool(lessons_lessons)},
+                "rounds": rounds, "role_models": role_models, "role_backends": role_backends,
+                "handoff": None}
+
     # ---- planner (once) ----
     plan_prompt = (
         f"TASK (repo: {instance['repo']} @ {instance['base_commit']}):\n\n{problem}\n\n"
@@ -904,6 +948,9 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
     precode = {"verdict": pre_ev["response"], "tool_uses": pre_ev["tool_uses"],
                "patch_present": False, "before_first_executor": True, "replanned": False,
                "eval": pre_ev}
+    il = _first_limit(planner=p, precode_evaluator=pre_ev)   # #623: abort BEFORE any executor round
+    if il:
+        return _infra_skip_result(il[0], il[1], precode)
     if "ISSUE-PLAN" in (pre_ev["response"] or "").upper() and N2 > 0 and not dry_run:
         N2 -= 1
         pr = run_role(spec=specs["planner"], model=role_models["planner"],
@@ -968,6 +1015,10 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
                        "executor": e, "evaluator": ev, "evaluator_verdict": eval_verdict,
                        "action": action, "oracle": oracle, "diff_bytes": len(last_diff),
                        "diff_text": last_diff})   # persist the ACTUAL patch + the evaluator's structured verdict
+
+        il = _first_limit(executor=e, evaluator=ev)   # #623: a rate-limited role -> abort, don't burn more iters
+        if il:
+            return _infra_skip_result(il[0], il[1], precode)
 
         act = action.get("action", "SHIP")
         # Test hook: force the first `force_iterate` iterations to ITERATE (deterministic smoke).
@@ -1051,6 +1102,7 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
             "loop_signal": LOOP_SIGNAL,                        # which signal drove SHIP/ITERATE (oracle | evaluator)
             "oracle_wrapper": profile["oracle"]["wrapper"],   # so faithfulness checks the REAL wrapper, not a hardcoded one
             "verdict": verdict, "final_resolved": final_resolved, "rounds_used": rounds_used,
+            "infra_skip": False, "infra_reason": None,                 # #623: real run (not rate-limited)
             "iterations": iterations, "max_iters": MAX_ITERS, "precode_gate": precode,
             "lessons_lookup": {"topic": lessons_topic, "n_chars": len(lessons_lessons),
                              "injected": bool(lessons_lessons)},
