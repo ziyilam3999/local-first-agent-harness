@@ -26,8 +26,14 @@ VENV_PY="${LFAH_VENV_PY:-python3}"
 TS="$(date +%s)"
 WORK="$PWD/.eval_patch_jest-${IID}-${TS}"
 mkdir -p "$WORK"
-# Candidate patch = the executor's uncommitted change in this checkout.
-git diff > "$WORK/patch.diff"
+# Candidate patch = the executor's uncommitted change in this checkout, INCLUDING new files.
+# Plain `git diff` is blind to untracked files (a new-file fix would look empty). Stage all
+# changes (honors .gitignore so build junk is excluded), capture the staged diff (renders new
+# files as apply-able `new file mode` hunks), then unstage so the working tree is left exactly
+# as the executor left it. Mirrors git_diff() in relay.py.
+git add -A
+git diff --cached > "$WORK/patch.diff"
+git reset -q
 RUN_ID="evalpatchjest-${IID}-${TS}"
 
 "$VENV_PY" - "$IID" "$WORK/patch.diff" "$RUN_ID" "$HARNESS_DIR" <<'PY'
