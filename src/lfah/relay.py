@@ -691,10 +691,25 @@ def reset_repo(repo: Path, base_commit: str):
 
 
 def git_diff(repo: Path) -> str:
+    """Capture the working-tree changes as a candidate patch, INCLUDING new/untracked files.
+
+    Plain `git diff` is blind to untracked files, so a fix that CREATES a file (e.g. a missing
+    `types/*.d.ts`) would be captured as an EMPTY patch -- the chain would then score its own
+    correct fix as a failure and ship an incomplete patch. To include new files we stage every
+    change (`git add -A`, which honors .gitignore so build junk like node_modules is excluded),
+    read the STAGED diff (`git diff --cached`, which renders new files as proper `new file mode`
+    hunks that `git apply` recreates), then unstage (`git reset -q`, a mixed reset that touches
+    only the index -- every executor edit stays on disk for the next round). HEAD is base_commit
+    in a chain checkout, so the staged diff equals the candidate patch.
+    """
     if not Path(repo).exists():            # no checkout -> no diff
         return ""
-    return subprocess.run("git diff", shell=True, cwd=str(repo),
-                          capture_output=True, text=True).stdout
+    repo_s = str(repo)
+    subprocess.run("git add -A", shell=True, cwd=repo_s, capture_output=True)
+    out = subprocess.run("git diff --cached", shell=True, cwd=repo_s,
+                         capture_output=True, text=True).stdout
+    subprocess.run("git reset -q", shell=True, cwd=repo_s, capture_output=True)
+    return out
 
 
 def lessons_find(topic: str) -> str:
