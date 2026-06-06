@@ -1128,7 +1128,23 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
 # ---------------------------------------------------------------------------
 # Faithfulness assertions (the 6 axes) -- the smoke's pass/fail gate
 # ---------------------------------------------------------------------------
+def _is_skipped_result(result: dict) -> bool:
+    """A result that did NOT produce a real model run: an INFRA-SKIP (#623 provider rate-limit abort,
+    final_resolved=None, max_iters=None, often empty rounds) or any result with no rounds at all.
+
+    #640: this closes the #623 detector hole. #623 added INFRA-SKIP *detection* (run_chain early-returns),
+    but the downstream consumers assert_faithful()/compute_telemetry() -- which cli.py calls UNCONDITIONALLY
+    on every result -- never learned to skip them, so they crashed on `int <= max_iters` (None) and on
+    rounds[-1] (empty). Faithfulness + telemetry are N/A for a non-run; degrade gracefully, never hard-crash.
+    """
+    return bool(result.get("infra_skip")) or not result.get("rounds")
+
+
 def assert_faithful(result: dict) -> dict:
+    if _is_skipped_result(result):           # #640: INFRA-SKIP / no-run -> nothing to assert
+        return {"checks": {}, "all_pass": False,
+                "skipped": "infra_skip" if result.get("infra_skip") else "no_rounds",
+                "exec_tool_uses": 0, "eval_tool_uses": 0}
     checks, models = {}, result["role_models"]
     checks["heterogeneous_models"] = len(set(models.values())) >= 2
     checks["evaluator_ne_executor"] = models["evaluator"] != models["executor"]
@@ -1145,8 +1161,8 @@ def assert_faithful(result: dict) -> dict:
     checks["evaluator_executed_real_test"] = eval_ran_test
     # cap is per-ITERATION (MAX_ITERS = 1 + N1 + N2). A run is faithful iff its iteration count is within budget.
     iters = result.get("iterations", result["rounds_used"])
-    max_iters = result.get("max_iters", TOTAL_CAP)
-    checks["capped_<=max_iters"] = iters <= max_iters
+    max_iters = result.get("max_iters") or TOTAL_CAP   # None-safe: a non-skip result with a null cap
+    checks["capped_<=max_iters"] = iters <= max_iters   #          falls back to TOTAL_CAP, never int<=None
     # ship-broken: a SHIP verdict whose oracle says unresolved is allowed ONLY at the iteration cap.
     last = result["rounds"][-1]
     shipped_broken = (result["verdict"] == "SHIP" and not last["oracle"]["resolved"]
@@ -1165,6 +1181,9 @@ ROLE_KEYS = ("planner", "executor", "evaluator")
 
 
 def compute_telemetry(result: dict) -> dict:
+    if _is_skipped_result(result):           # #640: INFRA-SKIP / no-run -> no telemetry (rounds[-1] empty)
+        return {"models": {}, "performance": {}, "cost": {}, "quality": {}, "chain_wall_s": 0.0,
+                "skipped": "infra_skip" if result.get("infra_skip") else "no_rounds"}
     per_role = {}
     for rd in result["rounds"]:
         for rk in ROLE_KEYS:
