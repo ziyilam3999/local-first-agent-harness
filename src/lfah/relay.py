@@ -915,12 +915,20 @@ def conn_fail_hit(resp) -> bool:
     return bool(_LOCAL_CONN_FAIL_RE.search(blob))
 
 
+# Some call sites label a role by its CHAIN PHASE (e.g. `precode_evaluator` is the evaluator's pre-code
+# pass), but role_backends is keyed by the BASE role (planner/executor/evaluator). Map phase->base so the
+# backend lookup resolves; the returned label keeps the phase name (more informative in the snippet).
+_ROLE_BACKEND_ALIAS = {"precode_evaluator": "evaluator"}
+
+
 def _first_conn_fail(role_backends, **roles):
     """Return (role, snippet) for the first LOCAL-backend role whose response is a connection failure
     (proxy/Ollama unreachable), else None. Scoped to LOCAL backends: a transient cloud network blip is out
     of scope (#645 is the CCR/Ollama-down case); cloud-provider errors are #623's domain."""
+    rb = role_backends or {}
     for role, resp in roles.items():
-        if (role_backends or {}).get(role) == "local" and conn_fail_hit(resp):
+        base = _ROLE_BACKEND_ALIAS.get(role, role)     # resolve phase-labelled roles to their backend key
+        if rb.get(base) == "local" and conn_fail_hit(resp):
             snippet = (resp.get("response") or resp.get("soft_error") or "").strip().replace("\n", " ")[:160]
             return role, snippet
     return None

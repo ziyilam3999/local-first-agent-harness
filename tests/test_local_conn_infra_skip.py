@@ -34,6 +34,19 @@ def test_first_conn_fail_scoped_to_local_backend():
     assert "Unable to connect" in snippet
 
 
+def test_first_conn_fail_resolves_precode_evaluator_to_evaluator_backend():
+    """Regression: the pre-code gate labels the role `precode_evaluator`, but role_backends is keyed by the
+    base role `evaluator`. The backend lookup must resolve the alias, else a LOCAL pre-code evaluator's
+    connection failure is silently missed (the detection branch is dead). See #645 self-review."""
+    backends = {"planner": "cloud", "executor": "local", "evaluator": "local"}
+    role, snippet = relay._first_conn_fail(backends, precode_evaluator={"response": BANNER, "tool_uses": []})
+    assert role == "precode_evaluator"            # label keeps the phase name
+    assert "Unable to connect" in snippet
+    # but a CLOUD evaluator's pre-code pass is still out of scope
+    backends_cloud = {"planner": "cloud", "executor": "local", "evaluator": "cloud"}
+    assert relay._first_conn_fail(backends_cloud, precode_evaluator={"response": BANNER, "tool_uses": []}) is None
+
+
 def _profile(resolved=False):
     return {"recipes": {"planner": None, "executor": None, "evaluator": None},
             "category": "code-fix",
