@@ -59,3 +59,50 @@ def test_run_chain_infra_skips_before_any_executor_round(tmp_path, monkeypatch):
     assert "provider_rate_limit" in result["infra_reason"]
     # planner + pre-code evaluator only -> aborted BEFORE the executor loop (would be >=3 calls otherwise)
     assert calls["n"] == 2, f"expected abort after 2 role calls, got {calls['n']} (executor round burned)"
+
+
+def _infra_skip_result():
+    """A minimal INFRA-SKIP result as run_chain.`_infra_skip_result` builds it: final_resolved=None,
+    max_iters=None, empty rounds. This is what cli.py hands to assert_faithful/compute_telemetry."""
+    return {"instance_id": "iamkun__dayjs-1964", "mode": "c", "category": "code-fix",
+            "loop_signal": "evaluator", "oracle_wrapper": "eval_patch_jest.sh",
+            "verdict": "INFRA-SKIP", "final_resolved": None, "infra_skip": True,
+            "infra_reason": "provider_rate_limit:planner", "infra_snippet": "session limit",
+            "rounds_used": 2, "iterations": 0, "max_iters": None, "precode_gate": None,
+            "rounds": [], "role_models": {"planner": "opus", "executor": "sonnet", "evaluator": "opus"},
+            "role_backends": {"planner": "cloud", "executor": "cloud", "evaluator": "cloud"},
+            "handoff": None}
+
+
+def test_assert_faithful_does_not_crash_on_infra_skip():
+    """#640: the #623 detector hole. cli.py calls assert_faithful UNCONDITIONALLY -- incl. on the
+    INFRA-SKIP result whose max_iters=None. Before the fix this raised
+    `'<=' not supported between int and NoneType` and killed the whole arm. Now it degrades to a
+    neutral 'skipped' faithfulness object instead of hard-crashing."""
+    faith = relay.assert_faithful(_infra_skip_result())
+    assert faith["skipped"] == "infra_skip"
+    assert faith["checks"] == {}
+    assert faith["all_pass"] is False
+
+
+def test_compute_telemetry_does_not_crash_on_infra_skip():
+    """#640 sibling: compute_telemetry is also called unconditionally and indexed rounds[-1]/rounds[0]
+    -> IndexError on the empty-rounds INFRA-SKIP result. Now it returns a neutral 'skipped' telemetry."""
+    tel = relay.compute_telemetry(_infra_skip_result())
+    assert tel["skipped"] == "infra_skip"
+    assert tel["chain_wall_s"] == 0.0
+    assert tel["performance"] == {} and tel["cost"] == {}
+
+
+def test_assert_faithful_max_iters_none_safe_on_real_run():
+    """#640 defensive: a NON-skip result that somehow carries max_iters=None must fall back to TOTAL_CAP,
+    never `int <= None`. Build a real one-round result with a null cap and confirm no crash."""
+    rd = {"executor": {"tool_uses": [{"name": "Edit"}]},
+          "evaluator": {"tool_uses": [{"name": "Bash", "input": {"command": "bash eval_patch_jest.sh"}}],
+                        "response": "VERDICT: PASS"},
+          "oracle": {"resolved": True}}
+    result = {"verdict": "SHIP", "rounds_used": 1, "iterations": 1, "max_iters": None,
+              "oracle_wrapper": "eval_patch_jest.sh", "rounds": [rd],
+              "role_models": {"planner": "opus", "executor": "sonnet", "evaluator": "opus"}}
+    faith = relay.assert_faithful(result)                    # must not raise int<=None
+    assert faith["checks"]["capped_<=max_iters"] is True     # fell back to TOTAL_CAP
