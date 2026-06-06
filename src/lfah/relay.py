@@ -148,7 +148,7 @@ CLOUD_HANDOFF_MODEL = _cfg("LFAH_CLOUD_HANDOFF_MODEL", "CLOUD_HANDOFF_MODEL", de
 #                 the end (recorded per round as truth for skill-evolve), never to drive the loop.
 # Default "oracle" preserves historical behavior; the production-faithful runs set LFAH_LOOP_SIGNAL=evaluator.
 LOOP_SIGNAL = (_cfg("LFAH_LOOP_SIGNAL", "LOOP_SIGNAL", default="oracle") or "oracle").lower()
-if LOOP_SIGNAL not in ("oracle", "evaluator"):
+if LOOP_SIGNAL not in ("oracle", "evaluator", "both"):
     LOOP_SIGNAL = "oracle"
 
 # Tools a headless chain role must NEVER be able to invoke. `--allowedTools` is an ALLOW set, but it
@@ -754,6 +754,11 @@ def decide_action(*, oracle_resolved: bool, eval_text: str, n1_left: int, n2_lef
       oracle    -> SHIP iff the docker oracle says resolved (GROUND TRUTH; oracle-in-the-loop upper bound).
       evaluator -> SHIP iff the EVALUATOR verdict is PASS (a fallible model judgment; production-faithful).
                    The oracle still GRADES at the end but does NOT drive this decision.
+      both      -> SHIP iff oracle resolved AND evaluator PASS. For a NON-ground-truth oracle (a weak /
+                   self-written acceptance test that can go green on buggy code), this makes a concrete
+                   evaluator ISSUE-CODE on a resolved oracle ITERATE instead of ship — the independent
+                   cold-read backstops a coverage-gap test. final_resolved still = oracle truth; at budget
+                   exhaustion it still SHIP-CAPs, so the resolved-count is unchanged (only an extra fix try).
     In BOTH modes the evaluator's verdict routes the KIND of iterate (ISSUE-PLAN -> replan; else executor):
       pass(by the active signal)    -> SHIP
       not-pass + ISSUE-PLAN + N2    -> ITERATE-REPLAN   (the plan was wrong; regenerate it)
@@ -764,6 +769,8 @@ def decide_action(*, oracle_resolved: bool, eval_text: str, n1_left: int, n2_lef
     verdict = classify_eval_verdict(eval_text)
     if loop_signal == "evaluator":
         passed, pass_reason = (verdict == "PASS"), "evaluator_pass"
+    elif loop_signal == "both":
+        passed, pass_reason = (oracle_resolved and verdict == "PASS"), "oracle_resolved+evaluator_pass"
     else:
         passed, pass_reason = oracle_resolved, "oracle_resolved"
     if passed:
@@ -1124,7 +1131,12 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
         # -> SHIP-CAPPED. The post-loop cloud handoff (improvement C) may then rescue it. "passed_now" uses
         # the ACTIVE loop signal (oracle truth / evaluator verdict) so the fail-fast never consults the
         # oracle in evaluator mode.
-        passed_now = (eval_verdict == "PASS") if LOOP_SIGNAL == "evaluator" else oracle["resolved"]
+        if LOOP_SIGNAL == "evaluator":
+            passed_now = (eval_verdict == "PASS")
+        elif LOOP_SIGNAL == "both":
+            passed_now = oracle["resolved"] and eval_verdict == "PASS"
+        else:
+            passed_now = oracle["resolved"]
         if (role_backends["executor"] == "local" and e.get("soft_error") in ("timeout", "stuck")
                 and not passed_now):
             rounds[-1]["action"] = {"action": "SHIP",
@@ -1170,6 +1182,8 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
     last_verdict = rounds[-1].get("evaluator_verdict", "UNCLEAR")
     if LOOP_SIGNAL == "evaluator":
         handoff_trigger = exec_failed_fast or (last_verdict != "PASS")
+    elif LOOP_SIGNAL == "both":
+        handoff_trigger = exec_failed_fast or not (rounds[-1]["oracle"]["resolved"] and last_verdict == "PASS")
     else:
         handoff_trigger = exec_failed_fast and not rounds[-1]["oracle"]["resolved"]
     if CLOUD_HANDOFF and not dry_run and role_backends["executor"] == "local" and handoff_trigger:

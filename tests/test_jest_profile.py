@@ -131,6 +131,28 @@ def test_decide_action_loop_signal():
                                n1_left=0, n2_left=0, loop_signal="evaluator")["reason"] == "budget_exhausted"
 
 
+def test_decide_action_both_gate():
+    """`both` mode: SHIP iff oracle resolved AND evaluator PASS. The whole point — a green-but-weak oracle
+    (a coverage-gap test) with a concrete evaluator ISSUE-CODE must NOT ship; it iterates so the executor
+    gets the named defect. This is exactly the case oracle-mode shipped (the lcp-p2 verifyNumbers bug)."""
+    # oracle resolved BUT evaluator ISSUE-CODE -> NOT a ship in `both` (oracle-mode WOULD ship here):
+    b = relay.decide_action(oracle_resolved=True, eval_text="VERDICT: ISSUE-CODE",
+                            n1_left=1, n2_left=1, loop_signal="both")
+    assert b["action"].startswith("ITERATE"), b
+    # contrast: same inputs in oracle-mode DO ship (documents the fixed gap)
+    assert relay.decide_action(oracle_resolved=True, eval_text="VERDICT: ISSUE-CODE",
+                               n1_left=1, n2_left=1, loop_signal="oracle")["action"] == "SHIP"
+    # oracle resolved AND evaluator PASS -> SHIP
+    assert relay.decide_action(oracle_resolved=True, eval_text="VERDICT: PASS",
+                               n1_left=1, n2_left=1, loop_signal="both") == {"action": "SHIP", "reason": "oracle_resolved+evaluator_pass"}
+    # oracle UNRESOLVED + evaluator PASS -> NOT a ship in `both` (needs the real test too)
+    assert relay.decide_action(oracle_resolved=False, eval_text="VERDICT: PASS",
+                               n1_left=1, n2_left=0, loop_signal="both")["action"].startswith("ITERATE")
+    # both + no budget -> capped ship (resolved-count preserved; only an extra fix try was added)
+    assert relay.decide_action(oracle_resolved=True, eval_text="VERDICT: ISSUE-CODE",
+                               n1_left=0, n2_left=0, loop_signal="both")["reason"] == "budget_exhausted"
+
+
 def test_existing_python_path_unchanged():
     """AC5 (unit): an instance with no language field is byte-for-byte the old codefix profile."""
     chosen = relay.select_profile({"instance_id": "pytest-dev__pytest-1"})
