@@ -890,6 +890,59 @@ def _first_limit(**roles):
     return None
 
 
+# --- #645: LOCAL-backend connection failure -> INFRA-SKIP (the proxy/Ollama is down, NOT a model loss) ---
+# When the local proxy (CCR on CCR_BASE_URL) or Ollama is unreachable, the local executor's `claude -p`
+# returns the CLI's connection-failure banner ("API Error: Unable to connect to API (ConnectionRefused)")
+# in place of real output -- 0 tool uses, no patch, on EVERY round. The role does NOT raise (a result dict
+# comes back), so #641's failure-capture never fires AND #623's _PROVIDER_LIMIT_RE doesn't match. Net: the
+# arm records resolved=False and the analyzer counts it as a MODEL LOSS -- a down proxy silently makes the
+# local arm look incapable (asymmetric: cloud arms are immune). Detect it, abort as INFRA-SKIP, stop iterating.
+_LOCAL_CONN_FAIL_RE = re.compile(
+    r"api error:.{0,40}unable to connect|unable to connect to api|"
+    r"\bECONNREFUSED\b|connection ?refused", re.I)
+
+
+def conn_fail_hit(resp) -> bool:
+    """True iff a role response is the CLI's LOCAL-backend connection-failure banner (proxy/Ollama
+    unreachable) -- an INFRA failure (the model never ran), NOT a model loss. See #645.
+    Guarded on ZERO tool uses: a real fix that merely MENTIONS 'connection refused' in its prose has
+    tool_uses + a patch and is never flagged; only an empty banner-only run counts."""
+    if not isinstance(resp, dict):
+        return False
+    if resp.get("tool_uses"):                      # a productive run is never an infra-skip, whatever it says
+        return False
+    blob = (resp.get("response") or "") + " " + (resp.get("soft_error") or "")
+    return bool(_LOCAL_CONN_FAIL_RE.search(blob))
+
+
+def _first_conn_fail(role_backends, **roles):
+    """Return (role, snippet) for the first LOCAL-backend role whose response is a connection failure
+    (proxy/Ollama unreachable), else None. Scoped to LOCAL backends: a transient cloud network blip is out
+    of scope (#645 is the CCR/Ollama-down case); cloud-provider errors are #623's domain."""
+    for role, resp in roles.items():
+        if (role_backends or {}).get(role) == "local" and conn_fail_hit(resp):
+            snippet = (resp.get("response") or resp.get("soft_error") or "").strip().replace("\n", " ")[:160]
+            return role, snippet
+    return None
+
+
+def _local_backend_reachable(timeout_s: float = 3.0):
+    """Cheap reachability preflight for the local proxy (CCR_BASE_URL). Returns (ok: bool, detail: str).
+    Run BEFORE a local-backend role: if the proxy/Ollama is down, every role call returns ConnectionRefused
+    and the whole instance is wasted (#645 CCR-down incident, 2026-06-06). Any HTTP response -- even 4xx/5xx
+    -- means the proxy is up and listening, so only a transport-level failure (refused/timeout) is 'down'."""
+    import urllib.request
+    import urllib.error
+    url = CCR_BASE_URL.rstrip("/") + "/"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as r:   # noqa: S310 (local, fixed scheme)
+            return True, f"HTTP {getattr(r, 'status', '?')}"
+    except urllib.error.HTTPError as ex:                            # server answered (up) with an error code
+        return True, f"HTTP {ex.code}"
+    except Exception as ex:                                         # refused / timeout / DNS -> proxy is down
+        return False, f"{type(ex).__name__}: {ex}"
+
+
 def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: dict,
               mode: str, profile: dict, dry_run: bool = False) -> dict:
     """role_models/role_backends: per-role {planner,executor,evaluator}. `profile` is the loaded
@@ -920,19 +973,32 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
     lessons_block = ("\n\nRELEVANT PRIOR LESSONS (factor these into your review):\n"
                    + (lessons_lessons if lessons_lessons else "(none on record for this topic)") + "\n")
 
-    def _infra_skip_result(role, snippet, precode_obj):
-        # #623: a provider rate-limit aborted this instance -> INFRA-SKIP. final_resolved=None (NOT False:
-        # it is not a model failure), verdict="INFRA-SKIP", flagged so the runner/analyzer never count it.
+    def _infra_skip_result(role, snippet, precode_obj, reason="provider_rate_limit"):
+        # #623/#645: an INFRA failure (provider rate-limit OR local proxy/Ollama unreachable) aborted this
+        # instance -> INFRA-SKIP. final_resolved=None (NOT False: it is not a model failure), verdict=
+        # "INFRA-SKIP", flagged so the runner/analyzer never count it as a model loss.
         return {"instance_id": iid, "mode": mode, "category": profile.get("category"),
                 "loop_signal": LOOP_SIGNAL, "oracle_wrapper": profile["oracle"]["wrapper"],
                 "verdict": "INFRA-SKIP", "final_resolved": None,
-                "infra_skip": True, "infra_reason": f"provider_rate_limit:{role}", "infra_snippet": snippet,
+                "infra_skip": True, "infra_reason": f"{reason}:{role}", "infra_snippet": snippet,
                 "rounds_used": rounds_used, "iterations": len(rounds), "max_iters": None,
                 "precode_gate": precode_obj,
                 "lessons_lookup": {"topic": lessons_topic, "n_chars": len(lessons_lessons),
                                    "injected": bool(lessons_lessons)},
                 "rounds": rounds, "role_models": role_models, "role_backends": role_backends,
                 "handoff": None}
+
+    # #645 preflight: if any role runs on the LOCAL backend, smoke the proxy (CCR_BASE_URL) BEFORE the
+    # planner. A down proxy makes every local role return ConnectionRefused -> abort the instance as
+    # INFRA-SKIP up front (fail-fast in <3s) instead of running the chain on a dead backend and recording a
+    # false model loss. "smoke the feature green before the run" at engine granularity (covers every caller +
+    # a proxy that dies mid-batch). dry_run smokes skip it (no real backend in play).
+    if not dry_run and "local" in (role_backends or {}).values():
+        _ok, _detail = _local_backend_reachable()
+        if not _ok:
+            return _infra_skip_result("preflight",
+                                      f"local backend {CCR_BASE_URL} unreachable: {_detail}", None,
+                                      reason="local_backend_unreachable")
 
     # ---- planner (once) ----
     plan_prompt = (
@@ -966,6 +1032,9 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
     il = _first_limit(planner=p, precode_evaluator=pre_ev)   # #623: abort BEFORE any executor round
     if il:
         return _infra_skip_result(il[0], il[1], precode)
+    cf = _first_conn_fail(role_backends, planner=p, precode_evaluator=pre_ev)   # #645: local proxy/Ollama down
+    if cf:
+        return _infra_skip_result(cf[0], cf[1], precode, reason="local_connection_failure")
     if "ISSUE-PLAN" in (pre_ev["response"] or "").upper() and N2 > 0 and not dry_run:
         N2 -= 1
         pr = run_role(spec=specs["planner"], model=role_models["planner"],
@@ -1034,6 +1103,9 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
         il = _first_limit(executor=e, evaluator=ev)   # #623: a rate-limited role -> abort, don't burn more iters
         if il:
             return _infra_skip_result(il[0], il[1], precode)
+        cf = _first_conn_fail(role_backends, executor=e, evaluator=ev)   # #645: local proxy/Ollama down mid-chain
+        if cf:
+            return _infra_skip_result(cf[0], cf[1], precode, reason="local_connection_failure")
 
         act = action.get("action", "SHIP")
         # Test hook: force the first `force_iterate` iterations to ITERATE (deterministic smoke).
