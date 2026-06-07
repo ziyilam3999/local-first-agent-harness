@@ -50,10 +50,11 @@ def test_jest_profile_wires_the_jest_oracle():
 
 
 def test_select_profile_language_axis():
-    """AC2: javascript -> jest oracle; everything else -> the default pytest codefix oracle."""
-    for lang in ("javascript", "JavaScript", "js", "JS"):
+    """AC2: javascript AND typescript -> jest oracle (ts-jest grades .ts under the same npx-jest oracle);
+    everything else -> the default pytest codefix oracle."""
+    for lang in ("javascript", "JavaScript", "js", "JS", "typescript", "TypeScript", "ts", "TS"):
         assert relay.select_profile({"language": lang})["oracle"]["fn"] is relay.jest_oracle_eval
-    for inst in ({}, {"language": "python"}, {"language": ""}, {"language": "typescript"}, None):
+    for inst in ({}, {"language": "python"}, {"language": ""}, {"language": "go"}, None):
         assert relay.select_profile(inst)["oracle"]["fn"] is relay.oracle_eval
 
 

@@ -15,7 +15,7 @@ unit-testable with a stub runner (no models, no GPU).
 Manifest schema (JSON):
   {
     "project_name": "my-app",
-    "language": "javascript",          # selects the jest profile; omit/other -> pytest profile
+    "language": "javascript",          # "javascript"/"typescript" -> jest profile; omit/other -> pytest
     "phases": [
       { "id": "p1", "title": "...",
         "test_file": "phases/p1.test.js",          # source of the RED acceptance test (relative to manifest)
@@ -41,7 +41,31 @@ _JS_PKG = {
     "name": "greenfield-app", "version": "0.0.0", "private": True,
     "scripts": {"test": "jest"}, "devDependencies": {"jest": "^29.7.0"},
 }
-_GITIGNORE = "node_modules/\n.jestout.json\n.eval_patch_jest-*\ncoverage/\n.ai-workspace/\n"
+# TypeScript scaffold (#672 verdict): ts-jest plugs into the SAME `npx jest` oracle, so the engine/oracle
+# need NO change. Type-checking is ON (tsconfig `isolatedModules: false`) so a TYPE error fails the test
+# run — a cheap extra correctness gate for the agent executor, beyond the acceptance test's own asserts.
+# Tests stay CommonJS (module: commonjs) to dodge jest's ESM rough edge.
+_TS_PKG = {
+    "name": "greenfield-app", "version": "0.0.0", "private": True,
+    "scripts": {"test": "jest"},
+    "devDependencies": {
+        "jest": "^30.0.0", "ts-jest": "^29.4.0", "typescript": "^5.4.0",
+        "@types/jest": "^30.0.0", "@types/node": "^20.0.0",
+    },
+}
+_TS_JEST_CONFIG = ("/** @type {import('ts-jest').JestConfigWithTsJest} */\n"
+                   "module.exports = { preset: 'ts-jest', testEnvironment: 'node' };\n")
+_TSCONFIG = {
+    "compilerOptions": {
+        "target": "ES2021", "module": "commonjs", "lib": ["ES2021"], "strict": True,
+        "esModuleInterop": True, "skipLibCheck": True, "forceConsistentCasingInFileNames": True,
+        "isolatedModules": False, "types": ["jest", "node"], "rootDir": ".", "outDir": "dist",
+    },
+    "include": ["src/**/*.ts", "__tests__/**/*.ts"],
+}
+_GITIGNORE = "node_modules/\n.jestout.json\n.eval_patch_jest-*\ncoverage/\ndist/\n.ai-workspace/\n"
+_NODE_LANGS = ("javascript", "js", "typescript", "ts")
+_TS_LANGS = ("typescript", "ts")
 
 
 def _sh(cmd, cwd=None, env=None, check=True):
@@ -57,7 +81,8 @@ def _git(args, cwd, **kw):
 
 
 def scaffold_project(project: Path, language: str, *, npm_install: bool = True) -> None:
-    """Create an empty, git-init'd project with a runnable test harness (jest for javascript)."""
+    """Create an empty, git-init'd project with a runnable test harness (jest for javascript/typescript)."""
+    language = (language or "").lower()
     if project.exists():
         shutil.rmtree(project)
     project.mkdir(parents=True)
@@ -65,13 +90,18 @@ def scaffold_project(project: Path, language: str, *, npm_install: bool = True) 
     (project / "src").mkdir()
     (project / ".gitignore").write_text(_GITIGNORE)
     tracked = [".gitignore"]
-    if language in ("javascript", "js"):
+    if language in _TS_LANGS:
+        (project / "package.json").write_text(json.dumps(_TS_PKG, indent=2) + "\n")
+        (project / "jest.config.js").write_text(_TS_JEST_CONFIG)
+        (project / "tsconfig.json").write_text(json.dumps(_TSCONFIG, indent=2) + "\n")
+        tracked += ["package.json", "jest.config.js", "tsconfig.json"]
+    elif language in ("javascript", "js"):
         (project / "package.json").write_text(json.dumps(_JS_PKG, indent=2) + "\n")
         tracked.append("package.json")
     _git(["init", "-q"], cwd=project)
     _git(["add", *tracked], cwd=project)
     _git(["commit", "-q", "-m", "scaffold: empty greenfield project"], cwd=project)
-    if npm_install and language in ("javascript", "js"):
+    if npm_install and language in _NODE_LANGS:
         _sh(["npm", "install", "--silent", "--no-audit", "--no-fund"], cwd=project)
 
 
