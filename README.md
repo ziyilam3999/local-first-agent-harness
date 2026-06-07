@@ -217,8 +217,8 @@ careful human does by hand:
    (`FAIL_TO_PASS`) and a plain-English problem statement. lfah scaffolds an empty, git-init'd project
    and drops in the first phase's test. It fails — there's no code yet.
 2. **Green.** The stock fix-chain (local executor + cloud fallback) writes code until the project's
-   **real test suite** goes green. No LLM grades the work — the test runner does (jest for JavaScript,
-   pytest otherwise).
+   **real test suite** goes green. Whether the test passes is decided by the project's real test runner
+   (jest for JavaScript, pytest otherwise) — never by an LLM.
 3. **Gate + commit.** A phase ships only when the test is green **and** an independent evaluator agrees
    (the `--loop-signal both` gate — the phase test is *your* acceptance criterion, not ground truth, so
    lfah backstops a thin test with a second opinion). On ship it commits, advancing the base for the next
