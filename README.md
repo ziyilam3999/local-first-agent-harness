@@ -202,6 +202,43 @@ only pay for the cloud when the local model gives up.
    Prefer to wire it explicitly? `--executor-backend local --local-model <name> --cloud-fallback sonnet`
    does the same thing without the convenience defaults.
 
+## Greenfield builds: automated TDD (`lfah build`)
+
+The same engine also builds **new** projects from scratch — not by free-styling code, but by
+**Test-Driven Development (TDD)**, automated. That's the headline feature: every capability begins life
+as a *failing test*, and the agent chain isn't finished until the project's real test runner says it
+passes.
+
+It's TDD at the **acceptance** level (each test is a whole feature, not a tiny unit), so the precise name
+is *acceptance-test-driven development* — but the loop is exactly the red → green → commit cycle a
+careful human does by hand:
+
+1. **Red.** You hand `lfah build` a manifest: a list of phases, each carrying one failing acceptance test
+   (`FAIL_TO_PASS`) and a plain-English problem statement. lfah scaffolds an empty, git-init'd project
+   and drops in the first phase's test. It fails — there's no code yet.
+2. **Green.** The stock fix-chain (local executor + cloud fallback) writes code until the project's
+   **real test suite** goes green. No LLM grades the work — the test runner does (jest for JavaScript,
+   pytest otherwise).
+3. **Gate + commit.** A phase ships only when the test is green **and** an independent evaluator agrees
+   (the `--loop-signal both` gate — the phase test is *your* acceptance criterion, not ground truth, so
+   lfah backstops a thin test with a second opinion). On ship it commits, advancing the base for the next
+   phase. A phase that can't go green halts the build, so you never stack features on a broken one.
+
+Why it matters: the tests are the spec **and** the proof. You describe what each feature must do as a test
+that's true only when it works; the agent makes it true; the result is a project where every phase is
+backed by a passing test — built mostly on a free local model, escalating to the cloud only when stuck.
+That's the whole local-first value, pointed at greenfield work.
+
+```bash
+lfah build --manifest build.json \
+  --project ./my-app --data ./.lfah-data --out ./build-out
+# build.json: { project_name, language, phases: [ { id, title, test_file,
+#   test_path, f2p, p2p, problem_statement }, ... ] }
+```
+
+Each phase writes a result JSON + a log to `--out`, plus a `BUILD-SUMMARY.json` recording per-phase
+ship/no-ship and whether the local model or the cloud fallback resolved it.
+
 ## CLI reference
 
 ```
@@ -210,6 +247,9 @@ lfah run --instance <path.json>
          [--executor-backend cloud|local] [--local-model <name>]
          [--cloud-fallback <model>] [--mode a|c] [--out <dir>]
          [--local] [--dry-run]
+
+lfah build --manifest <path.json> --project <dir> --data <dir> --out <dir>
+           [--loop-signal oracle|evaluator|both] [--no-npm-install]
 
 lfah --version
 lfah -h
