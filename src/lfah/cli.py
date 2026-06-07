@@ -43,6 +43,19 @@ def _build_parser() -> argparse.ArgumentParser:
                           "enable cloud fallback.")
     run.add_argument("--dry-run", action="store_true",
                      help="Exercise the chain wiring without calling models or the oracle.")
+
+    build = sub.add_parser("build", help="Greenfield BUILD: drive a from-scratch app build as test-first "
+                                         "phases through the chain (scaffold -> per-phase red test -> chain "
+                                         "-> commit-on-SHIP), with the `both` ship-gate by default.")
+    build.add_argument("--manifest", required=True,
+                       help="Path to a build manifest JSON (project_name, language, phases[]). See lfah.build.")
+    build.add_argument("--project", required=True, help="Directory for the evolving project (created/reset).")
+    build.add_argument("--data", required=True, help="LFAH_DATA_DIR root for per-phase instance dirs.")
+    build.add_argument("--out", required=True, help="Directory for per-phase results + BUILD-SUMMARY.json.")
+    build.add_argument("--loop-signal", default="both", choices=["oracle", "evaluator", "both"],
+                       help="Ship gate (default: both — the phase test is OUR AC, not ground truth).")
+    build.add_argument("--no-npm-install", action="store_true",
+                       help="Skip `npm install` during scaffold (deps already present / non-JS).")
     return ap
 
 
@@ -167,11 +180,34 @@ def _run(args) -> int:
     return 0 if faith["all_pass"] else 1
 
 
+def _build(args) -> int:
+    from . import build as buildmod
+    manifest_path = Path(args.manifest).expanduser().resolve()
+    if not manifest_path.exists():
+        print(f"error: manifest not found: {manifest_path}", file=sys.stderr)
+        return 2
+    manifest = json.loads(manifest_path.read_text())
+    summary = buildmod.run_build(
+        manifest=manifest, project=Path(args.project).expanduser(),
+        data=Path(args.data).expanduser(), out=Path(args.out).expanduser(),
+        manifest_dir=manifest_path.parent, loop_signal=args.loop_signal,
+        npm_install=not args.no_npm_install)
+    print(f"=== lfah build: project={summary['project']} loop_signal={summary['loop_signal']} ===")
+    for r in summary["phases"]:
+        print(f"  phase {r['id']}: resolved={r['resolved']} by={r['solved_by']} "
+              f"iters={r['iterations']} cost=${r['cost_usd']} -> {(r['committed'] or '—')[:10]}")
+    print(f"pipeline_complete={summary['pipeline_complete']} "
+          f"({summary['phases_shipped']}/{summary['phases_total']} shipped)")
+    return 0 if summary["pipeline_complete"] else 1
+
+
 def main(argv=None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "run":
         return _run(args)
+    if args.command == "build":
+        return _build(args)
     parser.print_help()
     return 0
 
