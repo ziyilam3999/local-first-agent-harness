@@ -94,6 +94,32 @@ def test_compute_telemetry_does_not_crash_on_infra_skip():
     assert tel["performance"] == {} and tel["cost"] == {}
 
 
+def _no_rounds_result():
+    """A result with rounds==[] and infra_skip falsy -- the `no_rounds` skip arm."""
+    return {"instance_id": "iamkun__dayjs-1964", "mode": "c", "category": "code-fix",
+            "loop_signal": "evaluator", "oracle_wrapper": "eval_patch_jest.sh",
+            "verdict": "UNRESOLVED", "final_resolved": False, "infra_skip": False,
+            "infra_reason": None, "infra_snippet": None,
+            "rounds_used": 0, "iterations": 0, "max_iters": 3, "precode_gate": None,
+            "rounds": [], "role_models": {"planner": "opus", "executor": "sonnet", "evaluator": "opus"},
+            "role_backends": {"planner": "cloud", "executor": "cloud", "evaluator": "cloud"},
+            "handoff": None}
+
+
+def test_assert_faithful_no_rounds_skip():
+    faith = relay.assert_faithful(_no_rounds_result())
+    assert faith["skipped"] == "no_rounds"
+    assert faith["checks"] == {}
+    assert faith["all_pass"] is False
+
+
+def test_compute_telemetry_no_rounds_skip():
+    tel = relay.compute_telemetry(_no_rounds_result())
+    assert tel["skipped"] == "no_rounds"
+    assert tel["chain_wall_s"] == 0.0
+    assert tel["performance"] == {} and tel["cost"] == {}
+
+
 def test_assert_faithful_max_iters_none_safe_on_real_run():
     """#640 defensive: a NON-skip result that somehow carries max_iters=None must fall back to TOTAL_CAP,
     never `int <= None`. Build a real one-round result with a null cap and confirm no crash."""
