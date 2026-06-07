@@ -82,6 +82,29 @@ def test_run_build_relative_paths_resolve(tmp_path, monkeypatch):
     assert link.is_symlink() and link.resolve() == (tmp_path / "project").resolve()  # link not broken
 
 
+def test_scaffold_typescript_emits_ts_jest_and_tsconfig(tmp_path):
+    """TS support (#672/#673): a typescript scaffold lays a ts-jest package.json + jest.config.js +
+    a tsconfig.json with type-checking ON (isolatedModules false), all git-tracked. The oracle is
+    unchanged — ts-jest grades .ts under the same `npx jest`."""
+    proj = tmp_path / "tsproj"
+    build.scaffold_project(proj, "typescript", npm_install=False)
+    dev = json.loads((proj / "package.json").read_text())["devDependencies"]
+    assert "ts-jest" in dev and "typescript" in dev and "@types/jest" in dev
+    assert (proj / "jest.config.js").exists()
+    tscfg = json.loads((proj / "tsconfig.json").read_text())
+    assert tscfg["compilerOptions"]["isolatedModules"] is False   # types gate at test time
+    tracked = subprocess.run(["git", "-C", str(proj), "ls-files"], capture_output=True, text=True).stdout
+    assert all(f in tracked for f in ("package.json", "jest.config.js", "tsconfig.json"))
+
+
+def test_scaffold_javascript_has_no_tsconfig(tmp_path):
+    """Behavior-preserving: a plain javascript scaffold still emits only package.json (no TS files)."""
+    proj = tmp_path / "jsproj"
+    build.scaffold_project(proj, "javascript", npm_install=False)
+    assert (proj / "package.json").exists()
+    assert not (proj / "tsconfig.json").exists() and not (proj / "jest.config.js").exists()
+
+
 def test_run_build_stops_on_unresolved_phase(tmp_path, monkeypatch):
     md, run_cmd = _setup(tmp_path)
     monkeypatch.setenv("STUB_FAIL", "bp2")   # bp1 ships, bp2 does not -> pipeline halts at bp2

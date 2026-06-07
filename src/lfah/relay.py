@@ -823,12 +823,13 @@ def make_jest_profile() -> dict:
 
 
 def select_profile(instance: dict) -> dict:
-    """The language axis: pick the code-fix profile for an instance's declared language. JavaScript
-    (language in {'javascript','js'}) -> the jest-graded profile; everything else (python, an absent
-    field, or any other value) -> the default pytest/swebench codefix profile. Existing Python
-    instances carry no 'language' field, so this is behavior-preserving for them."""
+    """The language axis: pick the code-fix profile for an instance's declared language. JavaScript and
+    TypeScript (language in {'javascript','js','typescript','ts'}) -> the jest-graded profile (ts-jest
+    transparently transpiles+type-checks .ts under the same `npx jest` oracle, so TS needs no oracle
+    change); everything else (python, an absent field, or any other value) -> the default pytest/swebench
+    codefix profile. Existing Python instances carry no 'language' field, so this is behavior-preserving."""
     lang = str((instance or {}).get("language", "") or "").strip().lower()
-    return make_jest_profile() if lang in ("javascript", "js") else make_codefix_profile()
+    return make_jest_profile() if lang in ("javascript", "js", "typescript", "ts") else make_codefix_profile()
 
 
 def assert_profile_complete(profile: dict, role_models: dict, role_backends: dict) -> dict:
