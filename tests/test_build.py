@@ -150,13 +150,27 @@ def test_scaffold_reuse_keeps_existing_project(tmp_path):
     fresh=True re-scaffolds (returns False, wipes)."""
     proj = tmp_path / "p"
     assert build.scaffold_project(proj, "javascript", npm_install=False) is False   # created fresh
-    (proj / "marker.txt").write_text("keep me\n")
-    subprocess.run(["git", "-C", str(proj), "add", "marker.txt"], check=True)
-    subprocess.run(["git", "-C", str(proj), "commit", "-q", "-m", "add marker"], check=True)
-    assert build.scaffold_project(proj, "javascript", npm_install=False) is True    # REUSE: no wipe
-    assert (proj / "marker.txt").exists()
+    (proj / "marker.txt").write_text("keep me\n")                                    # untracked sentinel
+    assert build.scaffold_project(proj, "javascript", npm_install=False) is True     # REUSE: no wipe
+    assert (proj / "marker.txt").exists()                                            # survived (not wiped)
     assert build.scaffold_project(proj, "javascript", npm_install=False, fresh=True) is False  # wipe
-    assert not (proj / "marker.txt").exists()
+    assert not (proj / "marker.txt").exists()                                        # gone (wiped)
+
+
+def test_scaffold_does_not_reuse_unrelated_git_repo(tmp_path):
+    """Safety: a plain git repo that is NOT an lfah scaffold (its root commit isn't the scaffold marker) must
+    NOT be reused — it gets wiped + re-scaffolded, so lfah never lays phase commits onto an unrelated repo."""
+    proj = tmp_path / "stranger"
+    proj.mkdir()
+    subprocess.run(["git", "-C", str(proj), "-c", "init.defaultBranch=main", "init", "-q"], check=True)
+    (proj / "their_code.txt").write_text("someone else's repo\n")
+    subprocess.run(["git", "-C", str(proj), "-c", "user.email=x@y.z", "-c", "user.name=x",
+                    "add", "their_code.txt"], check=True)
+    subprocess.run(["git", "-C", str(proj), "-c", "user.email=x@y.z", "-c", "user.name=x",
+                    "commit", "-q", "-m", "their initial commit"], check=True)
+    assert build._looks_like_greenfield_project(proj) is False        # not an lfah scaffold
+    assert build.scaffold_project(proj, "javascript", npm_install=False) is False   # wiped + re-scaffolded
+    assert not (proj / "their_code.txt").exists()
 
 
 def test_run_build_reuses_project_and_accumulates(tmp_path):

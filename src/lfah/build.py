@@ -80,17 +80,29 @@ def _git(args, cwd, **kw):
                 *args], cwd=cwd, **kw)
 
 
+_SCAFFOLD_MSG = "scaffold: empty greenfield project"
+
+
 def _looks_like_greenfield_project(project: Path) -> bool:
-    """A reusable lfah greenfield project: an already-scaffolded git repo (language-agnostic — a non-node
-    project has no package.json, so key off the git repo the scaffold always creates)."""
-    return (project / ".git").exists()
+    """A REUSABLE lfah greenfield project: an existing git repo whose ROOT commit is the lfah scaffold. Keying
+    off the scaffold's own root commit (not bare `.git`) means we never lay phase commits onto an UNRELATED
+    repo that happens to live at --project — only projects lfah itself scaffolded are reused. Language-agnostic
+    (a non-node scaffold has no package.json), so the scaffold marker commit is the signal."""
+    if not (project / ".git").exists():
+        return False
+    roots = _sh(["git", "rev-list", "--max-parents=0", "HEAD"], cwd=project, check=False)
+    root = (roots.stdout or "").strip().splitlines()
+    if not root:
+        return False
+    subj = _sh(["git", "log", "-1", "--format=%s", root[-1]], cwd=project, check=False)
+    return (subj.stdout or "").strip() == _SCAFFOLD_MSG
 
 
 def scaffold_project(project: Path, language: str, *, npm_install: bool = True, fresh: bool = False) -> bool:
     """Ensure `project` is a runnable greenfield repo (jest harness for javascript/typescript).
 
-    By DEFAULT this REUSES an existing project: if `project` already exists and looks like a greenfield repo
-    (a git repo with package.json), it is kept and the build's phases are laid on top of its current HEAD — so
+    By DEFAULT this REUSES an existing project: if `project` already exists and is an lfah scaffold (a git repo
+    whose root commit is the scaffold marker), it is kept and the build's phases are laid on top of HEAD — so
     successive `lfah build` runs accumulate into the SAME folder instead of each phase landing in a fresh one.
     Pass `fresh=True` to force a clean wipe + re-scaffold. Returns True if an existing project was reused, False
     if a fresh scaffold was created.
@@ -119,7 +131,7 @@ def scaffold_project(project: Path, language: str, *, npm_install: bool = True, 
         tracked.append("package.json")
     _git(["init", "-q"], cwd=project)
     _git(["add", *tracked], cwd=project)
-    _git(["commit", "-q", "-m", "scaffold: empty greenfield project"], cwd=project)
+    _git(["commit", "-q", "-m", _SCAFFOLD_MSG], cwd=project)
     if npm_install and language in _NODE_LANGS:
         _sh(["npm", "install", "--silent", "--no-audit", "--no-fund"], cwd=project)
     return False
