@@ -56,6 +56,10 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Ship gate (default: both — the phase test is OUR AC, not ground truth).")
     build.add_argument("--no-npm-install", action="store_true",
                        help="Skip `npm install` during scaffold (deps already present / non-JS).")
+    build.add_argument("--fresh", action="store_true",
+                       help="Force a clean wipe + re-scaffold of --project. Default REUSES an existing project "
+                            "(builds the manifest's phases on top of its current HEAD, so successive builds "
+                            "accumulate into the SAME folder).")
     return ap
 
 
@@ -191,7 +195,7 @@ def _build(args) -> int:
         manifest=manifest, project=Path(args.project).expanduser(),
         data=Path(args.data).expanduser(), out=Path(args.out).expanduser(),
         manifest_dir=manifest_path.parent, loop_signal=args.loop_signal,
-        npm_install=not args.no_npm_install)
+        npm_install=not args.no_npm_install, fresh=args.fresh)
     print(f"=== lfah build: project={summary['project']} loop_signal={summary['loop_signal']} ===")
     for r in summary["phases"]:
         print(f"  phase {r['id']}: resolved={r['resolved']} by={r['solved_by']} "
