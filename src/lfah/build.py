@@ -151,21 +151,33 @@ def run_phase(phase: dict, *, project: Path, data: Path, out: Path, manifest_dir
     if not res_path.exists():
         raise RuntimeError(f"phase {pid}: no result JSON (rc={proc.returncode}); see {out / (pid + '.log')}")
     res = json.loads(res_path.read_text())
-    resolved = bool(res.get("final_resolved"))
+    # SHIP signal for the BUILD: the phase's acceptance test went green via EITHER tier of the lfah chain.
+    # `final_resolved` is INTENTIONALLY the LOCAL-only honest result — relay keeps a cloud-handoff outcome in
+    # a SEPARATE `handoff` field so the BENCHMARK can attribute wins per tier (do NOT fold it into relay's
+    # final_resolved; #601 honesty depends on that separation). But for a BUILD the goal is a green phase, and
+    # the local->cloud escalation is a designed lfah feature (LFAH_CLOUD_HANDOFF), not an external rescue — so
+    # a handoff-resolved phase SHIPS too (#708). The cloud's files are already on disk (relay reset to base,
+    # the cloud wrote the fix, git_diff left them untracked), so the `git add -A` below commits them. We record
+    # per-tier resolution + the solving model so the summary stays honest about which tier produced the win.
+    local_resolved = bool(res.get("final_resolved"))
     handoff = res.get("handoff") or {}
-    who = "cloud-handoff" if handoff.get("resolved") else ("local" if resolved else "none")
+    handoff_resolved = bool(handoff.get("resolved"))
+    shipped = local_resolved or handoff_resolved
+    who = "cloud-handoff" if handoff_resolved else ("local" if local_resolved else "none")
 
     committed = None
-    if resolved:
+    if shipped:
         _git(["add", "-A"], cwd=project)  # gitignore excludes node_modules/.ai-workspace; keep any new dir
         # --allow-empty: a SHIP always records a phase-boundary commit so the base advances, even in the
         # degenerate case where the chain resolved with no net diff (don't crash the whole build on it).
         _git(["commit", "-q", "--allow-empty", "-m",
               f"phase {pid}: SHIP ({who}) — {phase.get('title', test_path)}"], cwd=project)
         committed = _git(["rev-parse", "HEAD"], cwd=project).stdout.strip()
-    return {"id": pid, "base": base, "resolved": resolved, "verdict": res.get("verdict"),
-            "solved_by": who, "iterations": res.get("iterations"),
-            "loop_signal": res.get("loop_signal"),
+    return {"id": pid, "base": base, "resolved": shipped,
+            "local_resolved": local_resolved, "handoff_resolved": handoff_resolved,
+            "verdict": res.get("verdict"), "solved_by": who,
+            "handoff_model": handoff.get("model_resolved") or handoff.get("model_requested"),
+            "iterations": res.get("iterations"), "loop_signal": res.get("loop_signal"),
             "cost_usd": (res.get("telemetry") or {}).get("cost", {}).get("chain_total_cost_usd"),
             "committed": committed, "result_file": str(res_path)}
 
