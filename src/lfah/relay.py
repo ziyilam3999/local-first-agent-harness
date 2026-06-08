@@ -1127,21 +1127,26 @@ def run_chain(*, instance: dict, repo: Path, role_models: dict, role_backends: d
         # Test hook: force the first `force_iterate` iterations to ITERATE (deterministic smoke).
         if iteration < force_iterate:
             act = "ITERATE-EXECUTOR" if N1 > 0 else ("ITERATE-REPLAN" if N2 > 0 else "SHIP")
-        # IMPROVEMENT A: a LOCAL executor that TIMED OUT or got STUCK is NOT retried on the same local
-        # model -- re-running re-fails and a capped role is the failure tail, not a slow solve. Fail fast
-        # -> SHIP-CAPPED. The post-loop cloud handoff (improvement C) may then rescue it. "passed_now" uses
-        # the ACTIVE loop signal (oracle truth / evaluator verdict) so the fail-fast never consults the
-        # oracle in evaluator mode.
+        # IMPROVEMENT A (broadened #709): a LOCAL executor that FAILED THIS ROUND -- timed out, got stuck,
+        # OR crashed (non-zero exit / <synthetic> model -- ANY non-empty soft_error) -- is NOT retried on the
+        # same local model: re-running a dead/capped local role re-fails, it is the failure tail not a slow
+        # solve. Fail fast -> SHIP-CAPPED so the post-loop cloud handoff (improvement C) can rescue it instead
+        # of burning the N1 iteration budget on a crashed executor. The `and not passed_now` guard means a
+        # crash AFTER the code is already correct (a prior round solved it; oracle/evaluator green this round)
+        # still ships normally -- only an UNSOLVED crashed round fails fast. Before #709 only "timeout"/"stuck"
+        # were caught, so a generic crash (soft_error="exit 1") slipped past and kept iterating on a dead role.
+        # "passed_now" uses the ACTIVE loop signal (oracle truth / evaluator verdict) -- never the oracle in
+        # evaluator mode. rate_limit soft_errors are already intercepted upstream as INFRA-SKIP (#623).
         if LOOP_SIGNAL == "evaluator":
             passed_now = (eval_verdict == "PASS")
         elif LOOP_SIGNAL == "both":
             passed_now = oracle["resolved"] and eval_verdict == "PASS"
         else:
             passed_now = oracle["resolved"]
-        if (role_backends["executor"] == "local" and e.get("soft_error") in ("timeout", "stuck")
-                and not passed_now):
+        if (role_backends["executor"] == "local" and e.get("soft_error") and not passed_now):
+            ff_reason = (e.get("soft_error") or "").split(":")[0].strip().replace(" ", "_") or "soft_error"
             rounds[-1]["action"] = {"action": "SHIP",
-                                    "reason": f"local_executor_{e.get('soft_error')}_no_retry"}
+                                    "reason": f"local_executor_{ff_reason}_no_retry"}
             verdict = "SHIP-CAPPED"
             break
         # Cap enforcement: the UNIT is iterations (MAX_ITERS = 1 + N1 + N2), not per-role-call rounds.
