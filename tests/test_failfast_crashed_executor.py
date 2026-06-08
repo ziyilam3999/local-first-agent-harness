@@ -8,7 +8,6 @@ Found via the dogfood P4a bp6 per-round review (2026-06-08): round 1's executor 
 (round 0 had already solved it, oracle+evaluator green), but a generic crash slipped past the
 timeout/stuck-only fail-fast.
 """
-from pathlib import Path
 import lfah.relay as relay
 
 
