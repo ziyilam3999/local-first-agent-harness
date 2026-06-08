@@ -8,21 +8,27 @@ from pathlib import Path
 
 from lfah import build
 
-# A fake `lfah run`: reads --instance + --out, writes lfah-<iid>-c.json. `final_resolved` is True unless
-# the instance_id is in STUB_FAIL (so we can drive a stop-on-unresolved case).
+# A fake `lfah run`: reads --instance + --out, writes lfah-<iid>-c.json. Three env-driven stub modes:
+#   STUB_FAIL    ids -> no impl written; local fails, no handoff field       -> phase halts the build.
+#   STUB_HANDOFF ids -> impl written; local fails but a handoff field lands  -> #708 cloud-handoff path.
+#   otherwise        -> impl written; local succeeds, no handoff field       -> ordinary local path.
 _STUB = '''import json, os, sys
 a = sys.argv
 inst = a[a.index("--instance") + 1]; out = a[a.index("--out") + 1]
 iid = json.load(open(inst))["instance_id"]
 fail = set(filter(None, os.environ.get("STUB_FAIL", "").split(",")))
-# Simulate the executor writing source into the project (repo = instance_dir/repo symlink).
+handoff_ids = set(filter(None, os.environ.get("STUB_HANDOFF", "").split(",")))
+# Simulate the executor (local OR cloud-handoff) writing source into the project; a hard FAIL writes nothing.
 repo = os.path.join(os.path.dirname(inst), "repo")
 if iid not in fail:
     os.makedirs(os.path.join(repo, "src"), exist_ok=True)
     open(os.path.join(repo, "src", iid + ".txt"), "w").write("impl " + iid + "\\n")
+handoff = ({"resolved": iid in handoff_ids, "model_resolved": "claude-sonnet-stub", "backend": "cloud"}
+           if iid in handoff_ids else None)
 os.makedirs(out, exist_ok=True)
-json.dump({"instance_id": iid, "final_resolved": iid not in fail, "verdict": "SHIP",
-           "loop_signal": "both", "iterations": 1, "handoff": None,
+json.dump({"instance_id": iid, "final_resolved": iid not in fail and iid not in handoff_ids,
+           "verdict": "SHIP" if iid not in fail else "SHIP-CAPPED",
+           "loop_signal": "both", "iterations": 1, "handoff": handoff,
            "telemetry": {"cost": {"chain_total_cost_usd": 0.0}}},
           open(os.path.join(out, f"lfah-{iid}-c.json"), "w"))
 '''
@@ -114,3 +120,26 @@ def test_run_build_stops_on_unresolved_phase(tmp_path, monkeypatch):
     assert summary["phases_shipped"] == 1
     log = _git_log(tmp_path / "project")
     assert "phase bp1: SHIP" in log and "phase bp2: SHIP" not in log  # bp2 never committed
+
+
+def test_run_build_ships_on_cloud_handoff(tmp_path, monkeypatch):
+    """#708: a phase the LOCAL tier did not resolve but the CLOUD HANDOFF tier did (final_resolved False,
+    handoff field present, the cloud's files already on disk) must SHIP, commit, and advance the base —
+    not halt the build. The win is attributed to the cloud-handoff tier (honest per-tier attribution),
+    and the cloud's on-disk file is really committed (not a hollow --allow-empty ship)."""
+    md, run_cmd = _setup(tmp_path)
+    monkeypatch.setenv("STUB_HANDOFF", "bp2")   # bp1 ships local; bp2 ships via the cloud handoff
+    summary = build.run_build(manifest=_MANIFEST, project=tmp_path / "project", data=tmp_path / "data",
+                              out=tmp_path / "out", manifest_dir=md, run_cmd=run_cmd, npm_install=False)
+    assert summary["pipeline_complete"] is True
+    assert summary["phases_shipped"] == 2
+    bp2 = summary["phases"][1]
+    assert bp2["resolved"] is True and bp2["solved_by"] == "cloud-handoff"
+    assert bp2["local_resolved"] is False and bp2["handoff_resolved"] is True
+    assert bp2["handoff_model"] == "claude-sonnet-stub"   # solving model named (per-tier attribution)
+    assert bp2["committed"] is not None
+    log = _git_log(tmp_path / "project")
+    assert "phase bp2: SHIP (cloud-handoff)" in log
+    tracked = subprocess.run(["git", "-C", str(tmp_path / "project"), "ls-files"],
+                             capture_output=True, text=True).stdout
+    assert "src/bp2.txt" in tracked   # the cloud's on-disk file was actually committed
