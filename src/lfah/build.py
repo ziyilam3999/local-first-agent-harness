@@ -80,9 +80,28 @@ def _git(args, cwd, **kw):
                 *args], cwd=cwd, **kw)
 
 
-def scaffold_project(project: Path, language: str, *, npm_install: bool = True) -> None:
-    """Create an empty, git-init'd project with a runnable test harness (jest for javascript/typescript)."""
+def _looks_like_greenfield_project(project: Path) -> bool:
+    """A reusable lfah greenfield project: an already-scaffolded git repo (language-agnostic — a non-node
+    project has no package.json, so key off the git repo the scaffold always creates)."""
+    return (project / ".git").exists()
+
+
+def scaffold_project(project: Path, language: str, *, npm_install: bool = True, fresh: bool = False) -> bool:
+    """Ensure `project` is a runnable greenfield repo (jest harness for javascript/typescript).
+
+    By DEFAULT this REUSES an existing project: if `project` already exists and looks like a greenfield repo
+    (a git repo with package.json), it is kept and the build's phases are laid on top of its current HEAD — so
+    successive `lfah build` runs accumulate into the SAME folder instead of each phase landing in a fresh one.
+    Pass `fresh=True` to force a clean wipe + re-scaffold. Returns True if an existing project was reused, False
+    if a fresh scaffold was created.
+    """
     language = (language or "").lower()
+    if project.exists() and not fresh and _looks_like_greenfield_project(project):
+        # REUSE: keep the project + its git history; build new phases on top of HEAD. Only (re)install deps
+        # when they're actually missing (e.g. a fresh clone of the repo) so the jest oracle can run.
+        if npm_install and language in _NODE_LANGS and not (project / "node_modules").exists():
+            _sh(["npm", "install", "--silent", "--no-audit", "--no-fund"], cwd=project)
+        return True
     if project.exists():
         shutil.rmtree(project)
     project.mkdir(parents=True)
@@ -103,6 +122,7 @@ def scaffold_project(project: Path, language: str, *, npm_install: bool = True) 
     _git(["commit", "-q", "-m", "scaffold: empty greenfield project"], cwd=project)
     if npm_install and language in _NODE_LANGS:
         _sh(["npm", "install", "--silent", "--no-audit", "--no-fund"], cwd=project)
+    return False
 
 
 def _default_run_cmd() -> list:
@@ -120,7 +140,9 @@ def run_phase(phase: dict, *, project: Path, data: Path, out: Path, manifest_dir
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(manifest_dir / phase["test_file"], dst)
     _git(["add", test_path], cwd=project)
-    _git(["commit", "-q", "-m", f"phase {pid}: red acceptance test ({test_path})"], cwd=project)
+    # --allow-empty: on a REUSED project, re-laying a phase whose test file is unchanged stages nothing;
+    # still record the phase-boundary commit so the base advances (and a re-run doesn't crash).
+    _git(["commit", "-q", "--allow-empty", "-m", f"phase {pid}: red acceptance test ({test_path})"], cwd=project)
     base = _git(["rev-parse", "HEAD"], cwd=project).stdout.strip()
 
     # instance dir with a symlink repo -> the one evolving project (the jest oracle reads
@@ -184,8 +206,12 @@ def run_phase(phase: dict, *, project: Path, data: Path, out: Path, manifest_dir
 
 def run_build(*, manifest: dict, project: Path, data: Path, out: Path, manifest_dir: Path,
               loop_signal: str = "both", local_timeout_s: str = "900", jest_docker: str = "0",
-              run_cmd: list | None = None, npm_install: bool = True) -> dict:
-    """Scaffold + drive every phase; STOP at the first phase that cannot go green (it blocks the rest)."""
+              run_cmd: list | None = None, npm_install: bool = True, fresh: bool = False) -> dict:
+    """Scaffold (or REUSE) the project + drive every phase; STOP at the first phase that cannot go green.
+
+    By default an existing project is REUSED — the manifest's phases are built on top of its current HEAD, so
+    successive builds accumulate into the SAME folder. Pass fresh=True to force a clean wipe + re-scaffold.
+    """
     language = str(manifest.get("language", "javascript")).lower()
     # Resolve to ABSOLUTE paths: the per-phase instance dir holds a symlink `repo` -> project, and a
     # relative target would resolve relative to the symlink's own location (broken link), plus the role
@@ -202,7 +228,7 @@ def run_build(*, manifest: dict, project: Path, data: Path, out: Path, manifest_
     env["LFAH_LOOP_SIGNAL"] = loop_signal   # build's AC is OUR test, not ground truth -> require BOTH (#660)
     env.setdefault("LOCAL_ROLE_TIMEOUT_S", local_timeout_s)
 
-    scaffold_project(project, language, npm_install=npm_install)
+    reused = scaffold_project(project, language, npm_install=npm_install, fresh=fresh)
     results, ok = [], True
     for phase in manifest["phases"]:
         r = run_phase(phase, project=project, data=data, out=out, manifest_dir=manifest_dir,
@@ -211,7 +237,7 @@ def run_build(*, manifest: dict, project: Path, data: Path, out: Path, manifest_
         if not r["resolved"]:
             ok = False
             break
-    summary = {"project": str(project), "loop_signal": loop_signal,
+    summary = {"project": str(project), "loop_signal": loop_signal, "reused": reused,
                "phases_total": len(manifest["phases"]),
                "phases_shipped": sum(1 for r in results if r["resolved"]),
                "pipeline_complete": ok and len(results) == len(manifest["phases"]),

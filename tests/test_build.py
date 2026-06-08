@@ -143,3 +143,71 @@ def test_run_build_ships_on_cloud_handoff(tmp_path, monkeypatch):
     tracked = subprocess.run(["git", "-C", str(tmp_path / "project"), "ls-files"],
                              capture_output=True, text=True).stdout
     assert "src/bp2.txt" in tracked   # the cloud's on-disk file was actually committed
+
+
+def test_scaffold_reuse_keeps_existing_project(tmp_path):
+    """scaffold_project REUSES an existing greenfield project by default (returns True, no wipe);
+    fresh=True re-scaffolds (returns False, wipes)."""
+    proj = tmp_path / "p"
+    assert build.scaffold_project(proj, "javascript", npm_install=False) is False   # created fresh
+    (proj / "marker.txt").write_text("keep me\n")
+    subprocess.run(["git", "-C", str(proj), "add", "marker.txt"], check=True)
+    subprocess.run(["git", "-C", str(proj), "commit", "-q", "-m", "add marker"], check=True)
+    assert build.scaffold_project(proj, "javascript", npm_install=False) is True    # REUSE: no wipe
+    assert (proj / "marker.txt").exists()
+    assert build.scaffold_project(proj, "javascript", npm_install=False, fresh=True) is False  # wipe
+    assert not (proj / "marker.txt").exists()
+
+
+def test_run_build_reuses_project_and_accumulates(tmp_path):
+    """Operator 2026-06-08: successive builds must accumulate into the SAME folder, not wipe per run.
+    Build manifest A (bp1) into ./project, then manifest B (bp9) into the SAME ./project: the default
+    REUSES the project (builds bp9 on top of HEAD), so bp1's impl + SHIP commit survive and bp9 is added."""
+    md, run_cmd = _setup(tmp_path)
+    (md / "p9.test").write_text("// red 9\n")
+    proj = tmp_path / "project"
+    man_a = {"project_name": "app", "language": "text",
+             "phases": [{"id": "bp1", "title": "one", "test_file": "p1.test", "test_path": "__tests__/p1.test",
+                         "f2p": "__tests__/p1.test", "p2p": [], "problem_statement": "make p1 pass"}]}
+    man_b = {"project_name": "app", "language": "text",
+             "phases": [{"id": "bp9", "title": "nine", "test_file": "p9.test", "test_path": "__tests__/p9.test",
+                         "f2p": "__tests__/p9.test", "p2p": ["__tests__/p1.test"],
+                         "problem_statement": "make p9 pass"}]}
+    sa = build.run_build(manifest=man_a, project=proj, data=tmp_path / "data", out=tmp_path / "outa",
+                         manifest_dir=md, run_cmd=run_cmd, npm_install=False)
+    assert sa["reused"] is False and sa["phases_shipped"] == 1
+    bp1_commit = sa["phases"][0]["committed"]
+    sb = build.run_build(manifest=man_b, project=proj, data=tmp_path / "data", out=tmp_path / "outb",
+                         manifest_dir=md, run_cmd=run_cmd, npm_install=False)
+    assert sb["reused"] is True and sb["phases_shipped"] == 1
+    log = _git_log(proj)
+    assert "phase bp1: SHIP" in log and "phase bp9: SHIP" in log     # bp1 survived; bp9 added on top
+    assert log.count("scaffold: empty greenfield project") == 1      # scaffolded ONCE, not re-scaffolded
+    tracked = subprocess.run(["git", "-C", str(proj), "ls-files"], capture_output=True, text=True).stdout
+    assert "src/bp1.txt" in tracked and "src/bp9.txt" in tracked
+    inst9 = json.loads((tmp_path / "data" / "instances" / "bp9" / "instance.json").read_text())
+    # bp9 was built ON TOP of the reused project: bp1's SHIP commit is an ancestor of bp9's base.
+    anc = subprocess.run(["git", "-C", str(proj), "merge-base", "--is-ancestor", bp1_commit,
+                          inst9["base_commit"]])
+    assert anc.returncode == 0
+
+
+def test_run_build_fresh_wipes_existing_project(tmp_path):
+    """--fresh forces a clean wipe + re-scaffold even when the project exists: the prior build's phase is gone."""
+    md, run_cmd = _setup(tmp_path)
+    proj = tmp_path / "project"
+    man_a = {"project_name": "app", "language": "text",
+             "phases": [{"id": "bp1", "title": "one", "test_file": "p1.test", "test_path": "__tests__/p1.test",
+                         "f2p": "__tests__/p1.test", "p2p": [], "problem_statement": "make p1 pass"}]}
+    build.run_build(manifest=man_a, project=proj, data=tmp_path / "data", out=tmp_path / "outa",
+                    manifest_dir=md, run_cmd=run_cmd, npm_install=False)
+    man_b = {"project_name": "app", "language": "text",
+             "phases": [{"id": "bp2", "title": "two", "test_file": "p2.test", "test_path": "__tests__/p2.test",
+                         "f2p": "__tests__/p2.test", "p2p": [], "problem_statement": "make p2 pass"}]}
+    sb = build.run_build(manifest=man_b, project=proj, data=tmp_path / "data", out=tmp_path / "outb",
+                         manifest_dir=md, run_cmd=run_cmd, npm_install=False, fresh=True)
+    assert sb["reused"] is False
+    tracked = subprocess.run(["git", "-C", str(proj), "ls-files"], capture_output=True, text=True).stdout
+    assert "src/bp1.txt" not in tracked and "src/bp2.txt" in tracked   # wiped: bp1 gone, only bp2
+    log = _git_log(proj)
+    assert "phase bp1: SHIP" not in log and "phase bp2: SHIP" in log
