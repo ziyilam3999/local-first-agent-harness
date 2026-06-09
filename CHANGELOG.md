@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Releases are cut client-side by the `/ship` pipeline (Stage 7), which pulls the
+section for a tag `vX.Y.Z` out of this file as the GitHub Release notes — so this
+changelog is the single source of truth for "what changed". See `CONTRIBUTING.md`
+for the release steps.
 
 ## Unreleased
 
@@ -11,9 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * CI workflow (`ci.yml`): ruff lint + pytest on a Linux/macOS × Python 3.10/3.12
   matrix, plus a Conventional Commits check on pushes to `main`.
-* Release workflow (`release.yml`): pushing a `v*` tag cuts a GitHub Release whose
-  body is extracted from this changelog, guarded so the tag must match the
-  `pyproject.toml` version.
 * `CONTRIBUTING.md`, issue templates (bug report + feature request), and a PR
   template.
 * `[tool.ruff]` config and a `dev` optional-dependency group (`pip install -e .[dev]`).
@@ -23,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * README install instructions point at `pip install git+https://…` until a PyPI
   release is published.
+* Standardized the release flow on the fleet's client-side `/ship` Stage 7 — dropped
+  the stray tag-triggered `release.yml` GitHub Action so releases are cut the same
+  way as every other repo. Versioning stays manual (this is a Python package with no
+  `package.json`, so Stage 7 skips the auto version bump); see `CONTRIBUTING.md`.
 
 ## [0.1.0] (2026-06-01)
 
