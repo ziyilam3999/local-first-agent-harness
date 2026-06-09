@@ -16,8 +16,8 @@ conference talks), follow these conventions so the brand sounds the same everywh
   immediately, a HOOK on why having one is amazing: the with-vs-without contrast.
   *Without* it, every bug fix burns expensive cloud tokens on one-shot guesses;
   *with* it, the heavy work runs FREE on your own local model and only escalates to the
-  cloud when it's genuinely stuck — graded by real tests, matching cloud quality at
-  roughly half the cost.
+  cloud when it's genuinely stuck — graded by real tests, matching cloud quality on
+  the hardest bugs at roughly half the cost.
 - **Stay honest.** The full-cloud relay is still the raw-quality ceiling (highest
   resolve %); recommend lfah on VALUE (cost-per-fix + a free local executor), never as
   "best at everything". See the README's "honest, axis by axis" section.
