@@ -19,6 +19,9 @@ for the release steps.
   template.
 * `[tool.ruff]` config and a `dev` optional-dependency group (`pip install -e .[dev]`).
 * README: badges, an architecture diagram, and an expanded local-model setup section.
+* `CONTRIBUTING.md` "Brand voice" section: lfah is pronounced "alpha" (spoken `Alpha`,
+  written `lfah`); spoken content must expand "local-first-agent-harness" in the intro
+  and lead with the with-vs-without hook. So future content is consistent.
 
 ### Changed
 

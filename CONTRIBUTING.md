@@ -2,6 +2,26 @@
 
 Thanks for your interest in contributing!
 
+## Brand voice — name, pronunciation & video/narration intro
+
+When producing ANY spoken content about this project (videos, voiceovers, demos,
+conference talks), follow these conventions so the brand sounds the same everywhere:
+
+- **Pronunciation: "lfah" is pronounced "alpha".** In a voiceover or text-to-speech
+  script, write the SPOKEN form as `Alpha` so it is voiced "alpha" — but keep the
+  DISPLAYED text (captions, on-screen titles, slides) as `lfah`. So: spoken = "Alpha",
+  written = `lfah`. If a single string drives both audio and on-screen text, split them.
+- **Always expand the name in the intro, then hook.** The first thing the audience
+  hears is that **lfah is short for "local-first-agent-harness"** — and then,
+  immediately, a HOOK on why having one is amazing: the with-vs-without contrast.
+  *Without* it, every bug fix burns expensive cloud tokens on one-shot guesses;
+  *with* it, the heavy work runs FREE on your own local model and only escalates to the
+  cloud when it's genuinely stuck — graded by real tests, matching cloud quality at
+  roughly half the cost.
+- **Stay honest.** The full-cloud relay is still the raw-quality ceiling (highest
+  resolve %); recommend lfah on VALUE (cost-per-fix + a free local executor), never as
+  "best at everything". See the README's "honest, axis by axis" section.
+
 ## Getting started
 
 ```bash
