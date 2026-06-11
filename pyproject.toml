@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-first-agent-harness"
-version = "0.1.0"
+version = "0.2.0"
 description = "A local-first coding agent — fixes real bugs on your local model, escalates to the cloud only when it's stuck, and grades itself with real tests."
 readme = "README.md"
 requires-python = ">=3.10"
