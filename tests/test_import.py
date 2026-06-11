@@ -7,7 +7,7 @@ from lfah import cli
 
 
 def test_version():
-    assert lfah.__version__ == "0.1.0"
+    assert lfah.__version__ == "0.2.0"
 
 
 def test_relay_imports_and_profile_complete():
