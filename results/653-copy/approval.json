@@ -1,0 +1,7 @@
+{
+  "approved": true,
+  "ratified_by": "operator",
+  "ratified_at": "2026-06-11",
+  "eli5": "The WRONG version builds its allowed-number list with Set.add(...spread), which only keeps the FIRST run of digits in each field. So for $0.32 it remembers 0 but forgets 32, then sees 32 in the text and screams 'fabricated!'. The RIGHT version loops and adds every run, so it accepts $0.32. The agent test plants $0.32 with its scope guard and demands ok:true, so it goes RED against the wrong version and GREEN against the reference. Approved to run the mutation gate.",
+  "note": "Operator intent for the copy phase was ratified 2026-06-11 (see the plan's RESOLVED decision). This record encodes that ratification for the slice-1 proof."
+}

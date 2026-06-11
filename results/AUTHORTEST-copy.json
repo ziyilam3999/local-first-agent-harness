@@ -1,0 +1,136 @@
+{
+  "phase": "copy",
+  "module": "src/copy.js",
+  "discriminates": true,
+  "mutants": {
+    "wrong": {
+      "label": "digit-run-drop",
+      "why": "Defeats the ACCEPT pick (multi-digit-run values like $0.32 must be accepted) \u2014 by collecting numbers with Set.add(...runs), only the FIRST digit-run per field is kept (0), so the second run (32) is treated as fabricated and the guarded $0.32 example is wrongly rejected (ok:false). This is the operator's discriminating example.",
+      "resolved": false,
+      "rc": 0,
+      "surface_match": true,
+      "reference_exports": [
+        "buildThread",
+        "verifyNumbers"
+      ],
+      "stub_exports": [
+        "buildThread",
+        "verifyNumbers"
+      ]
+    },
+    "wrong_all": [
+      {
+        "label": "digit-run-drop",
+        "why": "Defeats the ACCEPT pick (multi-digit-run values like $0.32 must be accepted) \u2014 by collecting numbers with Set.add(...runs), only the FIRST digit-run per field is kept (0), so the second run (32) is treated as fabricated and the guarded $0.32 example is wrongly rejected (ok:false). This is the operator's discriminating example.",
+        "resolved": false,
+        "rc": 0,
+        "surface_match": true,
+        "reference_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ],
+        "stub_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ]
+      },
+      {
+        "label": "no-fabrication-check",
+        "why": "Violates the REJECT pick 'a number absent from the spec (fabricated) -> ok:false' \u2014 the fabricated-number loop is removed, so '99 win rate' is no longer flagged and ok comes back true.",
+        "resolved": false,
+        "rc": 0,
+        "surface_match": true,
+        "reference_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ],
+        "stub_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ]
+      },
+      {
+        "label": "no-unguarded-check",
+        "why": "Violates the REJECT pick 'an in-spec metric value stated WITHOUT its scope guard (unguarded) -> ok:false' \u2014 the unguarded loop is removed, so bare '$0.32' (no scope present) returns ok:true.",
+        "resolved": false,
+        "rc": 0,
+        "surface_match": true,
+        "reference_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ],
+        "stub_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ]
+      }
+    ],
+    "reference": {
+      "resolved": true,
+      "rc": 0,
+      "reimpose_rc": 0
+    }
+  },
+  "author": {
+    "role": "redtest-author-specialist",
+    "model": "opus",
+    "model_resolved": "claude-opus-4-8",
+    "source": "live-agent",
+    "cost_usd": 0.5491535
+  },
+  "executor_model": "sonnet",
+  "reviewer": {
+    "verdict": "PASS",
+    "model": "sonnet",
+    "advisory": true,
+    "notes": "ations. The `no-fabrication-check` stub omits the fabrication loop so `ok` returns `true` \u2192 test fails the stub. \u2713\n\n3. **REJECT unguarded (`$0.32` bare)** \u2014 Test asserts `violations.some(v => v.type === 'unguarded')`. The `no-unguarded-check` stub removes the unguarded loop \u2192 `ok:true` \u2192 test fails the stub. \u2713\n\n**Gameability check:**\n\n- Tests assert concrete return values (`ok`, specific violation shapes, array length, specific tweet content), not mere module load or function existence.\n- `buildThread` tests verify structural output (positions, content) and exception behavior.\n- Each wrong-stub is caught by a different assertion path, so no single trivial bypass works against all three.\n\n**Minor note:** The ACCEPT test uses the *samples* metric's scope to guard the *cost* metric value. The reference implementation accepts any scope guard from any metric, not just the value's own metric scope. This is internally consistent (the operator's intent says \"with its scope guard\" \u2014 the spec also has a global `scopeGuard` field), and the test faithfully reflects the reference's semantics.\n\nAll three operator intents are exercised with specific, non-trivial assertions.\n\n```\nVERDICT: PASS\n```"
+  },
+  "picks_file": "results/653-copy/picks-copy.json",
+  "author_inputs": {
+    "spec": "Greenfield launch-content-pipeline Phase 2 (copy stage). src/copy.js exports verifyNumbers(text, spec) -> { ok, violations } and buildThread({ spec, generateHook }) -> string[]. A ContentSpec has shape { repoName, headline, metrics:[{name,value,scope}], scopeGuard, cta }. verifyNumbers must REJECT (ok:false) when EITHER (a) FABRICATED: text contains a number not present anywhere in the spec, or (b) UNGUARDED: a metric value appears in text but its scope string does not. Fully-guarded in-spec text returns ok:true. buildThread returns [hook, one-tweet-per-metric (value+scope inline), cta] and throws if the hook violates number-safety.",
+    "picks": {
+      "phase": "copy",
+      "module": "src/copy.js",
+      "test_path": "__tests__/copy.test.js",
+      "spec": "Greenfield launch-content-pipeline Phase 2 (copy stage). src/copy.js exports verifyNumbers(text, spec) -> { ok, violations } and buildThread({ spec, generateHook }) -> string[]. A ContentSpec has shape { repoName, headline, metrics:[{name,value,scope}], scopeGuard, cta }. verifyNumbers must REJECT (ok:false) when EITHER (a) FABRICATED: text contains a number not present anywhere in the spec, or (b) UNGUARDED: a metric value appears in text but its scope string does not. Fully-guarded in-spec text returns ok:true. buildThread returns [hook, one-tweet-per-metric (value+scope inline), cta] and throws if the hook violates number-safety.",
+      "accept": [
+        "every in-spec metric value stated WITH its scope guard is accepted (ok:true), INCLUDING multi-digit-run values like $0.32 whose digit-runs are 0 AND 32"
+      ],
+      "reject": [
+        "a number that is absent from the spec (fabricated, e.g. a '99 win rate') -> ok:false",
+        "an in-spec metric value stated WITHOUT its scope guard (unguarded) -> ok:false"
+      ],
+      "example_table": [
+        {
+          "input": "verifyNumbers(\"$0.32 (n=27, dayjs/jest, 1 rep)\", SPEC)  where SPEC has a metric { value: \"$0.32\", scope: \"sonnet 1-shot, cheapest arm\" } and another scope containing n=27",
+          "reference_output": "ok:true (every number in the text is in the spec and guarded)",
+          "wrong_stub_output": "ok:false (the wrong stub wrongly flags 32 as fabricated)",
+          "why": "$0.32 has digit-runs 0 AND 32. An allowed-number set built with Set.add(...spread) keeps only the FIRST run per field (0) and forgets 32, so a later $0.32 in the text reads as a fabricated number."
+        }
+      ],
+      "eli5": "The WRONG version builds its allowed-number list with Set.add(...spread), which only keeps the FIRST run of digits in each field. So for $0.32 it remembers 0 but forgets 32, then sees 32 in the text and screams 'fabricated!'. The RIGHT version loops and adds every run, so it knows both 0 and 32 and accepts $0.32. The agent test plants $0.32 with its scope guard and demands ok:true, so it goes RED against the wrong version and GREEN against the reference.",
+      "ratified_by": "operator",
+      "ratified_at": "2026-06-11"
+    },
+    "example_table": [
+      {
+        "input": "verifyNumbers(\"$0.32 (n=27, dayjs/jest, 1 rep)\", SPEC)  where SPEC has a metric { value: \"$0.32\", scope: \"sonnet 1-shot, cheapest arm\" } and another scope containing n=27",
+        "reference_output": "ok:true (every number in the text is in the spec and guarded)",
+        "wrong_stub_output": "ok:false (the wrong stub wrongly flags 32 as fabricated)",
+        "why": "$0.32 has digit-runs 0 AND 32. An allowed-number set built with Set.add(...spread) keeps only the FIRST run per field (0) and forgets 32, so a later $0.32 in the text reads as a fabricated number."
+      }
+    ]
+  },
+  "approval": {
+    "approved": true,
+    "ratified_by": "operator",
+    "ratified_at": "2026-06-11",
+    "eli5": "The WRONG version builds its allowed-number list with Set.add(...spread), which only keeps the FIRST run of digits in each field. So for $0.32 it remembers 0 but forgets 32, then sees 32 in the text and screams 'fabricated!'. The RIGHT version loops and adds every run, so it accepts $0.32. The agent test plants $0.32 with its scope guard and demands ok:true, so it goes RED against the wrong version and GREEN against the reference. Approved to run the mutation gate.",
+    "note": "Operator intent for the copy phase was ratified 2026-06-11 (see the plan's RESOLVED decision). This record encodes that ratification for the slice-1 proof."
+  },
+  "gate_run": {
+    "jest_docker": "0",
+    "loop": "jest_oracle_eval x2 (wrong->false, reference->true)"
+  },
+  "gated_at": "2026-06-11T21:00:17+0800"
+}

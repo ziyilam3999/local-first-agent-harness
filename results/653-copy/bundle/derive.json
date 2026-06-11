@@ -1,0 +1,101 @@
+{
+  "phase": "copy",
+  "module": "src/copy.js",
+  "test_path": "__tests__/copy.test.js",
+  "source": "live-agent",
+  "author": {
+    "role": "redtest-author-specialist",
+    "model": "opus",
+    "model_resolved": "claude-opus-4-8",
+    "source": "live-agent",
+    "cost_usd": 0.5491535
+  },
+  "executor_model": "sonnet",
+  "reviewer_model": "sonnet",
+  "picks_file": "results/653-copy/picks-copy.json",
+  "author_inputs": {
+    "spec": "Greenfield launch-content-pipeline Phase 2 (copy stage). src/copy.js exports verifyNumbers(text, spec) -> { ok, violations } and buildThread({ spec, generateHook }) -> string[]. A ContentSpec has shape { repoName, headline, metrics:[{name,value,scope}], scopeGuard, cta }. verifyNumbers must REJECT (ok:false) when EITHER (a) FABRICATED: text contains a number not present anywhere in the spec, or (b) UNGUARDED: a metric value appears in text but its scope string does not. Fully-guarded in-spec text returns ok:true. buildThread returns [hook, one-tweet-per-metric (value+scope inline), cta] and throws if the hook violates number-safety.",
+    "picks": {
+      "phase": "copy",
+      "module": "src/copy.js",
+      "test_path": "__tests__/copy.test.js",
+      "spec": "Greenfield launch-content-pipeline Phase 2 (copy stage). src/copy.js exports verifyNumbers(text, spec) -> { ok, violations } and buildThread({ spec, generateHook }) -> string[]. A ContentSpec has shape { repoName, headline, metrics:[{name,value,scope}], scopeGuard, cta }. verifyNumbers must REJECT (ok:false) when EITHER (a) FABRICATED: text contains a number not present anywhere in the spec, or (b) UNGUARDED: a metric value appears in text but its scope string does not. Fully-guarded in-spec text returns ok:true. buildThread returns [hook, one-tweet-per-metric (value+scope inline), cta] and throws if the hook violates number-safety.",
+      "accept": [
+        "every in-spec metric value stated WITH its scope guard is accepted (ok:true), INCLUDING multi-digit-run values like $0.32 whose digit-runs are 0 AND 32"
+      ],
+      "reject": [
+        "a number that is absent from the spec (fabricated, e.g. a '99 win rate') -> ok:false",
+        "an in-spec metric value stated WITHOUT its scope guard (unguarded) -> ok:false"
+      ],
+      "example_table": [
+        {
+          "input": "verifyNumbers(\"$0.32 (n=27, dayjs/jest, 1 rep)\", SPEC)  where SPEC has a metric { value: \"$0.32\", scope: \"sonnet 1-shot, cheapest arm\" } and another scope containing n=27",
+          "reference_output": "ok:true (every number in the text is in the spec and guarded)",
+          "wrong_stub_output": "ok:false (the wrong stub wrongly flags 32 as fabricated)",
+          "why": "$0.32 has digit-runs 0 AND 32. An allowed-number set built with Set.add(...spread) keeps only the FIRST run per field (0) and forgets 32, so a later $0.32 in the text reads as a fabricated number."
+        }
+      ],
+      "eli5": "The WRONG version builds its allowed-number list with Set.add(...spread), which only keeps the FIRST run of digits in each field. So for $0.32 it remembers 0 but forgets 32, then sees 32 in the text and screams 'fabricated!'. The RIGHT version loops and adds every run, so it knows both 0 and 32 and accepts $0.32. The agent test plants $0.32 with its scope guard and demands ok:true, so it goes RED against the wrong version and GREEN against the reference.",
+      "ratified_by": "operator",
+      "ratified_at": "2026-06-11"
+    },
+    "example_table": [
+      {
+        "input": "verifyNumbers(\"$0.32 (n=27, dayjs/jest, 1 rep)\", SPEC)  where SPEC has a metric { value: \"$0.32\", scope: \"sonnet 1-shot, cheapest arm\" } and another scope containing n=27",
+        "reference_output": "ok:true (every number in the text is in the spec and guarded)",
+        "wrong_stub_output": "ok:false (the wrong stub wrongly flags 32 as fabricated)",
+        "why": "$0.32 has digit-runs 0 AND 32. An allowed-number set built with Set.add(...spread) keeps only the FIRST run per field (0) and forgets 32, so a later $0.32 in the text reads as a fabricated number."
+      }
+    ]
+  },
+  "files": {
+    "agent_test": "copy.test.js",
+    "reference": "copy.js",
+    "wrong_stubs": [
+      {
+        "label": "digit-run-drop",
+        "why": "Defeats the ACCEPT pick (multi-digit-run values like $0.32 must be accepted) \u2014 by collecting numbers with Set.add(...runs), only the FIRST digit-run per field is kept (0), so the second run (32) is treated as fabricated and the guarded $0.32 example is wrongly rejected (ok:false). This is the operator's discriminating example.",
+        "file": "wrong_stub_digit-run-drop.js",
+        "surface_match": true,
+        "reference_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ],
+        "stub_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ]
+      },
+      {
+        "label": "no-fabrication-check",
+        "why": "Violates the REJECT pick 'a number absent from the spec (fabricated) -> ok:false' \u2014 the fabricated-number loop is removed, so '99 win rate' is no longer flagged and ok comes back true.",
+        "file": "wrong_stub_no-fabrication-check.js",
+        "surface_match": true,
+        "reference_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ],
+        "stub_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ]
+      },
+      {
+        "label": "no-unguarded-check",
+        "why": "Violates the REJECT pick 'an in-spec metric value stated WITHOUT its scope guard (unguarded) -> ok:false' \u2014 the unguarded loop is removed, so bare '$0.32' (no scope present) returns ok:true.",
+        "file": "wrong_stub_no-unguarded-check.js",
+        "surface_match": true,
+        "reference_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ],
+        "stub_exports": [
+          "buildThread",
+          "verifyNumbers"
+        ]
+      }
+    ]
+  },
+  "eli5": "We let a writer brag about real numbers, but only if every number was actually measured and is shown next to the 'where this came from' note (the scope). The tricky price $0.32 is really TWO number-chunks: 0 and 32. The right code remembers BOTH chunks as allowed, so when it sees $0.32 in the post it nods 'yep, both 0 and 32 are real, and there's a scope note nearby \u2014 fine.' The first wrong version is lazy: when it writes down the allowed numbers it only keeps the FIRST chunk of each field (0) and forgets 32, so later it screams 'where did 32 come from?!' and rejects a perfectly true sentence. The other two wrong versions each switch off one guard: one stops checking for made-up numbers (so a fake '99 win rate' sails through), and the other stops checking for missing scope notes (so a naked '$0.32' with no context passes). The right version keeps all three checks and remembers every digit-chunk.",
+  "derived_at": "2026-06-11T20:52:55+0800"
+}
