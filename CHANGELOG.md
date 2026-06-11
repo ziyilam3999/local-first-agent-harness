@@ -38,6 +38,20 @@ for the release steps.
   expensive mutation gate runs (previously only after jest ×2). `parse_author_response` now raises a
   clear `ValueError` (not a cryptic `AttributeError`) when a `wrong_stubs` entry is not an object.
 
+### Fixed
+
+* **Fail CLOSED on a partially-specified agent phase (review nit)** — `build._phase_agent_inputs`
+  previously returned `None` (gate SKIPPED) when ANY of `picks` / `reference` / `wrong_stubs` was
+  missing OR empty, so a phase carrying author intent but e.g. `wrong_stubs: []` (zero valid mutants)
+  BYPASSED the gate — exactly the case the gate exists to catch. Now a phase with ANY of the three but
+  not all three present-and-non-empty REFUSES (`GateRefusal`, naming what's missing); only a phase with
+  NONE of the three is treated as human-supplied (gate skipped, unchanged).
+* On a `GateRefusal` the copied-but-uncommitted RED test file is now cleaned up (`dst.unlink`) so a
+  refused phase leaves no stray file on disk.
+* `authortest.gate_phase_test` now slugifies a wrong-stub `label` before using it as a filename
+  component, so a label containing `/` (or other path-unsafe chars) cannot escape the inputs dir or
+  break the label round-trip.
+
 ## [0.2.0] (2026-06-11)
 
 ### Added

@@ -264,3 +264,32 @@ def test_gate_phase_test_passes_discriminating(tmp_path):
         run_role=_fake_review("PASS"))
     assert log["discriminates"] is True and log["refused"] is False
     assert log["reviewer"]["verdict"] == "PASS" and log["reviewer"]["blocking"] is True
+
+
+def test_safe_label_slug_strips_path_separators():
+    """#831 review nit: a wrong-stub label used as a filename component must be slugified — a `/` (or other
+    path-unsafe char) must not escape the inputs dir or land in a subdir, and the slug must round-trip as a
+    filename STEM (no separators)."""
+    assert "/" not in authortest._safe_label_slug("a/b", "stub0")
+    assert authortest._safe_label_slug("a/b", "stub0") == "a-b"
+    assert authortest._safe_label_slug("../escape", "stub0") == "escape"        # no leading dots/seps
+    assert authortest._safe_label_slug("good-label_1.x", "stub0") == "good-label_1.x"  # safe chars kept
+    assert authortest._safe_label_slug("///", "stub3") == "stub3"               # nothing usable -> fallback
+
+
+def test_gate_phase_test_sanitizes_slashed_label_filename(tmp_path):
+    """#831 review nit (end-to-end): a wrong-stub whose label contains `/` must not write outside the
+    inputs dir; gate_phase_test slugifies the label so the on-disk file is a safe stem and the gate still
+    discriminates (run_id becomes `wrong-<slug>`)."""
+    log = authortest.gate_phase_test(
+        picks=_PICKS, reference=_REFERENCE,
+        wrong_stubs=[{"label": "branch/evil", "code": _WRONG_SAME_SURFACE}], agent_test=_AGENT_TEST,
+        phase="demo", module="src/m.js", test_path="__tests__/m.test.js",
+        work_dir=tmp_path / "w", results_dir=tmp_path / "r",
+        jest_eval=_fake_jest({"reference": True, "wrong-branch-evil": False}),  # slugified run_id
+        run_role=_fake_review("PASS"))
+    assert log["discriminates"] is True and log["refused"] is False
+    inputs_dir = tmp_path / "w" / "inputs"
+    files = sorted(p.name for p in inputs_dir.iterdir() if p.is_file())
+    assert "branch-evil.js" in files                          # slugified, single flat file
+    assert not (inputs_dir / "branch").exists()               # no `branch/` subdir created

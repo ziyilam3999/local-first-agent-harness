@@ -171,6 +171,18 @@ def module_exports(js_text: str) -> set:
     return names
 
 
+def _safe_label_slug(label: str, fallback: str) -> str:
+    """Slugify a wrong-stub label so it is safe as a filename COMPONENT (#831 review nit). The label is
+    written to disk as `<slug><suffix>` and `derive(recorded-fallback)` re-derives the label from the file
+    STEM, so a label containing `/` (or other path separators / unsafe chars) would write to a subdir, can
+    escape inputs_dir, and the round-tripped stem would not match. Strip path separators + any char unsafe
+    for a filename down to a stable [A-Za-z0-9._-] slug; collapse runs of `-`; trim leading/trailing `.-`;
+    fall back to `fallback` (e.g. `stub<i>`) when nothing usable survives so distinct stubs stay distinct."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(label))
+    slug = re.sub(r"-{2,}", "-", slug).strip("-.")
+    return slug or fallback
+
+
 def _author_recipe_spec(recipe: str) -> dict:
     """Build a run_role spec for an author/reviewer role directly from its SKILL.md recipe (reuses
     relay.SKILLS_DIR). Pure text-generation roles — NO file tools — so they need no repo checkout and are
@@ -610,9 +622,12 @@ def gate_phase_test(*, picks: dict, reference: str, wrong_stubs: list, agent_tes
         code = ws.get("code") if isinstance(ws, dict) else ws
         if not code:
             raise ValueError(f"gate_phase_test: wrong_stub {label!r} has no code")
-        # Name the file by the bare label so the recorded-fallback derive (which derives a stub's label
-        # from its file STEM) keeps the same label -> the gate run_id stays `wrong-<label>` as expected.
-        sp = inputs_dir / f"{label}{Path(module).suffix}"
+        # Name the file by the SANITIZED label so the recorded-fallback derive (which derives a stub's
+        # label from its file STEM) keeps a matching label -> the gate run_id stays `wrong-<slug>`. The
+        # raw label may contain `/` or other filename-unsafe chars (which would escape inputs_dir / break
+        # the stem round-trip), so slugify before using it as a filename component.
+        safe_label = _safe_label_slug(label, f"stub{i}")
+        sp = inputs_dir / f"{safe_label}{Path(module).suffix}"
         sp.write_text(code)
         stub_paths.append(sp)
 

@@ -323,6 +323,37 @@ def test_run_phase_blocks_on_non_pass_reviewer(tmp_path):
     assert "phase ag1: red acceptance test" not in log   # blocked before commit
 
 
+def test_run_phase_refuses_partially_specified_agent_phase(tmp_path):
+    """(f) FAIL CLOSED (#831 review nit): a phase that carries agent intent (picks + reference) but an
+    EMPTY `wrong_stubs: []` (zero valid mutants) must REFUSE — the exact bypass the gate exists to catch —
+    rather than silently skipping the gate and committing an ungated RED test. The build RAISES GateRefusal
+    naming the missing input, and the RED test is NEVER committed."""
+    from lfah import authortest
+    md, run_cmd = _setup_agent(tmp_path)
+    man = _agent_manifest()
+    man["phases"][0]["wrong_stubs"] = []   # partially specified: has picks+reference, NO wrong_stubs
+    with pytest.raises(authortest.GateRefusal, match="wrong_stubs"):
+        build.run_build(manifest=man, project=tmp_path / "project", data=tmp_path / "data",
+                        out=tmp_path / "out", manifest_dir=md, run_cmd=run_cmd, npm_install=False,
+                        gate_jest_eval=_fake_jest({"reference": True, "wrong-branch": False}),
+                        gate_run_role=_fake_review("PASS"))
+    log = _git_log(tmp_path / "project")
+    assert "phase ag1: red acceptance test" not in log   # never committed (gate halted before commit)
+
+
+def test_run_phase_refusal_leaves_no_stray_red_test_file(tmp_path):
+    """(g) On a GateRefusal the RED test was copied to dst but must NOT be left on disk uncommitted
+    (#831 review nit): a non-discriminating phase refuses AND the dst file is cleaned up."""
+    from lfah import authortest
+    md, run_cmd = _setup_agent(tmp_path)
+    with pytest.raises(authortest.GateRefusal):
+        build.run_build(manifest=_agent_manifest(), project=tmp_path / "project", data=tmp_path / "data",
+                        out=tmp_path / "out", manifest_dir=md, run_cmd=run_cmd, npm_install=False,
+                        gate_jest_eval=_fake_jest({"reference": True, "wrong-branch": True}),  # non-discriminating
+                        gate_run_role=_fake_review("PASS"))
+    assert not (tmp_path / "project" / "__tests__" / "ag1.test").exists()   # no stray file left behind
+
+
 def test_run_phase_human_supplied_path_unchanged(tmp_path):
     """(e) A human-supplied phase (NO picks/reference/wrong_stubs) skips the gate entirely — the build
     runs exactly as before, even with no jest/role stubs wired. Manifest fields are present but null."""

@@ -145,11 +145,26 @@ def _default_run_cmd() -> list:
 
 def _phase_agent_inputs(phase: dict) -> dict | None:
     """A phase is AGENT-AUTHORED (so the mutation gate applies) iff it carries picks + reference +
-    wrong_stubs. A human-supplied phase (no such keys) returns None and the gate is skipped — existing
-    builds with plain `test_file`-only phases are untouched. The agent_test text comes from the phase's
-    `test_file` content (the same file `run_phase` lays down as the RED test)."""
-    if not (phase.get("picks") and phase.get("reference") and phase.get("wrong_stubs")):
-        return None
+    wrong_stubs (all present and non-empty). A human-supplied phase (NONE of those three keys) returns
+    None and the gate is skipped — existing builds with plain `test_file`-only phases are untouched. The
+    agent_test text comes from the phase's `test_file` content (the same file `run_phase` lays down).
+
+    FAIL CLOSED on a PARTIALLY-specified agent phase (#831 review nit): a phase that carries ANY of
+    picks/reference/wrong_stubs (clearly agent-authored intent) but NOT all three present-and-non-empty
+    must REFUSE — e.g. an author that produced a test but `wrong_stubs: []` (zero valid mutants) is
+    EXACTLY the bypass the gate exists to catch. Such a phase raises GateRefusal naming what's missing,
+    rather than silently skipping the gate and committing an ungated RED test."""
+    keys = ("picks", "reference", "wrong_stubs")
+    present = [k for k in keys if phase.get(k)]
+    if not present:
+        return None   # human-supplied phase: NONE of the three -> gate skipped (unchanged)
+    missing = [k for k in keys if not phase.get(k)]
+    if missing:
+        from . import authortest
+        raise authortest.GateRefusal(
+            f"partially-specified agent phase {phase.get('id')!r}: carries {present} but is missing or "
+            f"has empty {missing} — an agent-authored phase needs all of picks/reference/wrong_stubs "
+            f"present and non-empty (refusing rather than silently skipping the mutation gate)")
     return {"picks": phase["picks"], "reference": phase["reference"],
             "wrong_stubs": phase["wrong_stubs"]}
 
@@ -191,11 +206,17 @@ def run_phase(phase: dict, *, project: Path, data: Path, out: Path, manifest_dir
 
     # GATE the agent-authored RED test BEFORE committing it (#831): prove it discriminates a wrong-stub
     # from the reference + the fresh-eyes reviewer PASSes, else GateRefusal halts the phase. Human-supplied
-    # phases (no picks/reference/wrong_stubs) skip the gate entirely.
-    gate_log = gate_agent_authored_test(
-        phase, agent_test=dst.read_text(), gate_work=out / f"_gate-{pid}",
-        results_dir=out / "results", jest_eval=gate_jest_eval, run_role=gate_run_role,
-        node_modules_src=gate_node_modules_src)
+    # phases (no picks/reference/wrong_stubs) skip the gate entirely. On a refusal the RED test was already
+    # copied to `dst` but is never committed — unlink it so a refused phase leaves no stray file on disk.
+    from . import authortest
+    try:
+        gate_log = gate_agent_authored_test(
+            phase, agent_test=dst.read_text(), gate_work=out / f"_gate-{pid}",
+            results_dir=out / "results", jest_eval=gate_jest_eval, run_role=gate_run_role,
+            node_modules_src=gate_node_modules_src)
+    except authortest.GateRefusal:
+        dst.unlink(missing_ok=True)   # no stray uncommitted RED test left behind
+        raise
 
     _git(["add", test_path], cwd=project)
     # --allow-empty: on a REUSED project, re-laying a phase whose test file is unchanged stages nothing;
