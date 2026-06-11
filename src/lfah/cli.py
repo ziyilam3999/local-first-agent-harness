@@ -60,6 +60,47 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Force a clean wipe + re-scaffold of --project. Default REUSES an existing project "
                             "(builds the manifest's phases on top of its current HEAD, so successive builds "
                             "accumulate into the SAME folder).")
+
+    # `author-test` (#653): safe agent-authored red tests via a mutation gate. Two modes mirror the
+    # derive-then-approve-then-gate flow (the author writes the test BEFORE any code, the mutation gate
+    # proves it discriminates a wrong stub from the reference, an advisory reviewer double-checks intent).
+    at = sub.add_parser("author-test", help="Safe agent-authored red tests: derive a test+reference+wrong-"
+                                            "stub(s) from operator picks, then prove the test discriminates "
+                                            "via a mutation gate (jest_oracle_eval x2).")
+    at_sub = at.add_subparsers(dest="at_mode")
+
+    atd = at_sub.add_parser("derive", help="Author writes the red test + reference + wrong-stub(s) from the "
+                                          "operator's picks ONLY (never executor code); emits an ELI5; STOPS "
+                                          "for approval.")
+    atd.add_argument("--picks", required=True, help="Path to picks.json (operator MCQ accept/reject + "
+                                                    "example_table + spec/module/test_path/phase).")
+    atd.add_argument("--out", required=True, help="Directory for the derive bundle (test, reference, "
+                                                  "wrong-stubs, ELI5.md, derive.json).")
+    atd.add_argument("--author-model", default="opus", help="Cloud author model (default: opus).")
+    atd.add_argument("--executor-model", default="sonnet", help="The build's configured executor model, "
+                                                               "recorded so author.model != executor_model is "
+                                                               "meaningful (default: sonnet).")
+    atd.add_argument("--reviewer-model", default="sonnet", help="Advisory reviewer model, != author (default: "
+                                                              "sonnet).")
+    atd.add_argument("--source", choices=["live-agent", "recorded-fallback"], default="live-agent",
+                     help="live-agent = invoke the cloud author role; recorded-fallback = assemble from "
+                          "on-disk reference/wrong-stub/test (when the live author is unreachable).")
+    atd.add_argument("--reference", default=None, help="(recorded-fallback) reference module file.")
+    atd.add_argument("--wrong-stub", action="append", default=None,
+                     help="(recorded-fallback) a wrong-stub module file; repeat for >1.")
+    atd.add_argument("--agent-test", default=None, help="(recorded-fallback) the red acceptance test file.")
+    atd.add_argument("--dry-run", action="store_true", help="Exercise wiring without calling the model.")
+
+    atg = at_sub.add_parser("gate", help="Run the mutation gate (jest_oracle_eval x2) + advisory reviewer "
+                                        "on an approved derive bundle; write results/AUTHORTEST-<phase>.json.")
+    atg.add_argument("--bundle", required=True, help="The derive bundle dir (must contain derive.json).")
+    atg.add_argument("--results", required=True, help="Directory to write the committed gate-log into.")
+    atg.add_argument("--work", required=True, help="Scratch dir for the throwaway scaffold + jest runs.")
+    atg.add_argument("--approved", action="store_true", help="Recorded operator approval (required to run).")
+    atg.add_argument("--approval", default=None, help="Path to an approval.json carrying approved:true.")
+    atg.add_argument("--node-modules", default=None, help="Optional node_modules dir to seed (copied) into "
+                                                         "the scaffold so npm install is a near-noop/offline.")
+    atg.add_argument("--dry-run", action="store_true", help="Stub the reviewer role.")
     return ap
 
 
@@ -205,6 +246,49 @@ def _build(args) -> int:
     return 0 if summary["pipeline_complete"] else 1
 
 
+def _author_test(args) -> int:
+    from . import authortest
+    if args.at_mode == "derive":
+        m = authortest.derive(
+            picks_path=Path(args.picks).expanduser(), out_dir=Path(args.out).expanduser(),
+            author_model=args.author_model, executor_model=args.executor_model,
+            reviewer_model=args.reviewer_model, source=args.source,
+            reference_path=Path(args.reference).expanduser() if args.reference else None,
+            wrong_stub_paths=[Path(w).expanduser() for w in (args.wrong_stub or [])] or None,
+            agent_test_path=Path(args.agent_test).expanduser() if args.agent_test else None,
+            dry_run=args.dry_run)
+        print(f"=== author-test derive: phase={m['phase']} source={m['source']} ===")
+        print(f"author={m['author']['role']} model={m['author']['model']} (executor_model={m['executor_model']})")
+        print(f"wrote bundle -> {Path(args.out).expanduser()} (derive.json, {m['files']['agent_test']}, "
+              f"{m['files']['reference']}, {len(m['files']['wrong_stubs'])} wrong-stub(s), ELI5.md)")
+        for ws in m["files"]["wrong_stubs"]:
+            flag = "OK" if ws["surface_match"] else "SURFACE-MISMATCH"
+            print(f"  wrong-stub {ws['label']}: surface={flag} ({ws['stub_exports']})")
+        print("\nNEXT: surface ELI5.md to the operator for approval, then run `author-test gate --approved`.")
+        return 0
+    if args.at_mode == "gate":
+        try:
+            log = authortest.gate(
+                bundle_dir=Path(args.bundle).expanduser(), results_dir=Path(args.results).expanduser(),
+                work_dir=Path(args.work).expanduser(), approved=args.approved,
+                approval_path=Path(args.approval).expanduser() if args.approval else None,
+                node_modules_src=Path(args.node_modules).expanduser() if args.node_modules else None,
+                dry_run=args.dry_run)
+        except PermissionError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        print(f"=== author-test gate: phase={log['phase']} ===")
+        print(f"discriminates={log['discriminates']}  "
+              f"reference.resolved={log['mutants']['reference']['resolved']}  "
+              f"wrong.resolved={log['mutants']['wrong']['resolved']}")
+        print(f"author.model={log['author']['model']} != executor_model={log['executor_model']}  "
+              f"reviewer={log['reviewer']['model']} verdict={log['reviewer']['verdict']}")
+        print(f"\nwritten: {log['_gate_log_path']}")
+        return 0 if log["discriminates"] else 1
+    print("error: author-test needs a mode: derive | gate", file=sys.stderr)
+    return 2
+
+
 def main(argv=None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -212,6 +296,8 @@ def main(argv=None) -> int:
         return _run(args)
     if args.command == "build":
         return _build(args)
+    if args.command == "author-test":
+        return _author_test(args)
     parser.print_help()
     return 0
 

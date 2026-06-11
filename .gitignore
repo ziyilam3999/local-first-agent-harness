@@ -36,3 +36,7 @@ examples/patch.*.diff
 .jest-wrapper-testrun-*
 tests/fixtures/jest/_materialized/
 .jest-dbg*
+
+# author-test mutation-gate scratch (#653)
+results/**/_work/
+results/**/_runs/
