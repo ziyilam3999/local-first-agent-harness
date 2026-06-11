@@ -225,3 +225,144 @@ def test_run_build_fresh_wipes_existing_project(tmp_path):
     assert "src/bp1.txt" not in tracked and "src/bp2.txt" in tracked   # wiped: bp1 gone, only bp2
     log = _git_log(proj)
     assert "phase bp1: SHIP" not in log and "phase bp2: SHIP" in log
+
+
+# =============================================================================================
+# #831 slice 2 — the red-test mutation gate is wired into run_phase (gates BEFORE the test commit).
+# Everything stubbed: the chain runner (_STUB), the jest oracle, and the reviewer role — no models/node.
+# =============================================================================================
+import pytest  # noqa: E402
+
+# A near-correct reference/wrong-stub pair (same export surface, one localized behavior change) + a test.
+_REF = "function f(x){ return x % 2 === 0 ? x*2 : x*3; }\nmodule.exports = { f };\n"
+_WRONG = "function f(x){ return x*3; }\nmodule.exports = { f };\n"           # one change, same surface
+_AGENT_TEST = "const { f } = require('../src/m');\ntest('even doubles', () => expect(f(4)).toBe(8));\n"
+_PICKS = {"accept": ["even -> doubled"], "reject": ["even -> tripled"],
+          "spec": "f doubles evens, triples odds",
+          "example_table": [{"input": "f(4)", "reference_output": "8", "wrong_stub_output": "12"}]}
+
+
+def _agent_manifest():
+    """A one-phase manifest whose phase carries the agent inputs (picks/reference/wrong_stubs/module),
+    so run_phase runs the mutation gate before committing the RED test."""
+    return {"project_name": "app", "language": "text",
+            "phases": [{"id": "ag1", "title": "agent phase", "test_file": "ag1.test",
+                        "test_path": "__tests__/ag1.test", "f2p": "__tests__/ag1.test", "p2p": [],
+                        "problem_statement": "make ag1 pass",
+                        "module": "src/m.js", "picks": _PICKS, "reference": _REF,
+                        "wrong_stubs": [{"label": "branch", "why": "even -> tripled", "code": _WRONG}]}]}
+
+
+def _setup_agent(tmp_path):
+    md = tmp_path / "manifest"; md.mkdir()
+    (md / "ag1.test").write_text(_AGENT_TEST)   # the RED test the author wrote (laid by run_phase)
+    stub = tmp_path / "stub_run.py"; stub.write_text(_STUB)
+    return md, [sys.executable, str(stub)]
+
+
+def _fake_jest(resolved_by_runid):
+    def _j(instance_id, diff_path, run_id):
+        return {"resolved": resolved_by_runid[run_id], "rc": 0, "reimpose_rc": 0}
+    return _j
+
+
+def _fake_review(verdict="PASS"):
+    def _r(*, spec, model, backend, user_prompt, cwd, max_turns, dry_run=False):
+        return {"response": f"looks faithful.\nVERDICT: {verdict}", "cost_usd": 0.0}
+    return _r
+
+
+def test_run_phase_refuses_non_discriminating_red_test(tmp_path):
+    """(a) An agent-authored phase whose test passes BOTH mutants (does not discriminate) must REFUSE:
+    the gate raises, the build halts, and the RED test is NEVER committed."""
+    from lfah import authortest
+    md, run_cmd = _setup_agent(tmp_path)
+    with pytest.raises(authortest.GateRefusal, match="ag1"):
+        build.run_build(manifest=_agent_manifest(), project=tmp_path / "project", data=tmp_path / "data",
+                        out=tmp_path / "out", manifest_dir=md, run_cmd=run_cmd, npm_install=False,
+                        gate_jest_eval=_fake_jest({"reference": True, "wrong-branch": True}),
+                        gate_run_role=_fake_review("PASS"))
+    log = _git_log(tmp_path / "project")
+    assert "phase ag1: red acceptance test" not in log   # never committed (gate halted before commit)
+
+
+def test_run_phase_allows_discriminating_red_test(tmp_path):
+    """(b) A discriminating test (RED vs wrong-stub, GREEN vs reference) + PASS reviewer is ALLOWED: the
+    phase commits the RED test, the chain runs, and the phase ships. (d) the manifest carries the inputs."""
+    md, run_cmd = _setup_agent(tmp_path)
+    summary = build.run_build(
+        manifest=_agent_manifest(), project=tmp_path / "project", data=tmp_path / "data",
+        out=tmp_path / "out", manifest_dir=md, run_cmd=run_cmd, npm_install=False,
+        gate_jest_eval=_fake_jest({"reference": True, "wrong-branch": False}),
+        gate_run_role=_fake_review("PASS"))
+    assert summary["pipeline_complete"] is True and summary["phases_shipped"] == 1
+    log = _git_log(tmp_path / "project")
+    assert "phase ag1: red acceptance test" in log and "phase ag1: SHIP" in log
+    ph = summary["phases"][0]
+    # (d) per-phase manifest paper-trail carries picks/reference/wrong_stubs + the gate-log pointer.
+    assert ph["picks"] == _PICKS and ph["reference"] == _REF
+    assert ph["wrong_stubs"][0]["label"] == "branch"
+    assert ph["gate_discriminates"] is True and ph["gate_log"] is not None
+    assert Path(ph["gate_log"]).exists()   # the committed gate-log was written
+    # BUILD-SUMMARY.json on disk carries the same fields.
+    disk = json.loads((tmp_path / "out" / "BUILD-SUMMARY.json").read_text())
+    assert disk["phases"][0]["picks"] == _PICKS and disk["phases"][0]["wrong_stubs"][0]["code"] == _WRONG
+
+
+def test_run_phase_blocks_on_non_pass_reviewer(tmp_path):
+    """(c) A discriminating test but a non-PASS reviewer verdict BLOCKS the phase (reviewer is now
+    blocking in the build path, not advisory)."""
+    from lfah import authortest
+    md, run_cmd = _setup_agent(tmp_path)
+    with pytest.raises(authortest.GateRefusal, match="not PASS"):
+        build.run_build(manifest=_agent_manifest(), project=tmp_path / "project", data=tmp_path / "data",
+                        out=tmp_path / "out", manifest_dir=md, run_cmd=run_cmd, npm_install=False,
+                        gate_jest_eval=_fake_jest({"reference": True, "wrong-branch": False}),
+                        gate_run_role=_fake_review("CONCERN"))
+    log = _git_log(tmp_path / "project")
+    assert "phase ag1: red acceptance test" not in log   # blocked before commit
+
+
+def test_run_phase_refuses_partially_specified_agent_phase(tmp_path):
+    """(f) FAIL CLOSED (#831 review nit): a phase that carries agent intent (picks + reference) but an
+    EMPTY `wrong_stubs: []` (zero valid mutants) must REFUSE — the exact bypass the gate exists to catch —
+    rather than silently skipping the gate and committing an ungated RED test. The build RAISES GateRefusal
+    naming the missing input, and the RED test is NEVER committed."""
+    from lfah import authortest
+    md, run_cmd = _setup_agent(tmp_path)
+    man = _agent_manifest()
+    man["phases"][0]["wrong_stubs"] = []   # partially specified: has picks+reference, NO wrong_stubs
+    with pytest.raises(authortest.GateRefusal, match="wrong_stubs"):
+        build.run_build(manifest=man, project=tmp_path / "project", data=tmp_path / "data",
+                        out=tmp_path / "out", manifest_dir=md, run_cmd=run_cmd, npm_install=False,
+                        gate_jest_eval=_fake_jest({"reference": True, "wrong-branch": False}),
+                        gate_run_role=_fake_review("PASS"))
+    log = _git_log(tmp_path / "project")
+    assert "phase ag1: red acceptance test" not in log   # never committed (gate halted before commit)
+
+
+def test_run_phase_refusal_leaves_no_stray_red_test_file(tmp_path):
+    """(g) On a GateRefusal the RED test was copied to dst but must NOT be left on disk uncommitted
+    (#831 review nit): a non-discriminating phase refuses AND the dst file is cleaned up."""
+    from lfah import authortest
+    md, run_cmd = _setup_agent(tmp_path)
+    with pytest.raises(authortest.GateRefusal):
+        build.run_build(manifest=_agent_manifest(), project=tmp_path / "project", data=tmp_path / "data",
+                        out=tmp_path / "out", manifest_dir=md, run_cmd=run_cmd, npm_install=False,
+                        gate_jest_eval=_fake_jest({"reference": True, "wrong-branch": True}),  # non-discriminating
+                        gate_run_role=_fake_review("PASS"))
+    assert not (tmp_path / "project" / "__tests__" / "ag1.test").exists()   # no stray file left behind
+
+
+def test_run_phase_human_supplied_path_unchanged(tmp_path):
+    """(e) A human-supplied phase (NO picks/reference/wrong_stubs) skips the gate entirely — the build
+    runs exactly as before, even with no jest/role stubs wired. Manifest fields are present but null."""
+    md, run_cmd = _setup(tmp_path)   # the original 2-phase human manifest fixture (no agent inputs)
+    summary = build.run_build(manifest=_MANIFEST, project=tmp_path / "project", data=tmp_path / "data",
+                              out=tmp_path / "out", manifest_dir=md, run_cmd=run_cmd, npm_install=False)
+    assert summary["pipeline_complete"] is True and summary["phases_shipped"] == 2
+    ph0 = summary["phases"][0]
+    assert ph0["picks"] is None and ph0["reference"] is None and ph0["wrong_stubs"] is None
+    assert ph0["gate_log"] is None and ph0["gate_discriminates"] is None
+    # no AUTHORTEST gate-log was written for a human phase
+    assert not (tmp_path / "out" / "results").exists()

@@ -143,14 +143,81 @@ def _default_run_cmd() -> list:
     return [exe] if exe else [sys.executable, "-m", "lfah.cli"]
 
 
+def _phase_agent_inputs(phase: dict) -> dict | None:
+    """A phase is AGENT-AUTHORED (so the mutation gate applies) iff it carries picks + reference +
+    wrong_stubs (all present and non-empty). A human-supplied phase (NONE of those three keys) returns
+    None and the gate is skipped — existing builds with plain `test_file`-only phases are untouched. The
+    agent_test text comes from the phase's `test_file` content (the same file `run_phase` lays down).
+
+    FAIL CLOSED on a PARTIALLY-specified agent phase (#831 review nit): a phase that carries ANY of
+    picks/reference/wrong_stubs (clearly agent-authored intent) but NOT all three present-and-non-empty
+    must REFUSE — e.g. an author that produced a test but `wrong_stubs: []` (zero valid mutants) is
+    EXACTLY the bypass the gate exists to catch. Such a phase raises GateRefusal naming what's missing,
+    rather than silently skipping the gate and committing an ungated RED test."""
+    keys = ("picks", "reference", "wrong_stubs")
+    present = [k for k in keys if phase.get(k)]
+    if not present:
+        return None   # human-supplied phase: NONE of the three -> gate skipped (unchanged)
+    missing = [k for k in keys if not phase.get(k)]
+    if missing:
+        from . import authortest
+        raise authortest.GateRefusal(
+            f"partially-specified agent phase {phase.get('id')!r}: carries {present} but is missing or "
+            f"has empty {missing} — an agent-authored phase needs all of picks/reference/wrong_stubs "
+            f"present and non-empty (refusing rather than silently skipping the mutation gate)")
+    return {"picks": phase["picks"], "reference": phase["reference"],
+            "wrong_stubs": phase["wrong_stubs"]}
+
+
+def gate_agent_authored_test(phase: dict, *, agent_test: str, gate_work: Path, results_dir: Path,
+                             jest_eval=None, run_role=None,
+                             node_modules_src: Path | None = None) -> dict | None:
+    """If the phase is agent-authored, run the red-test mutation gate (authortest.gate_phase_test) BEFORE
+    the test is committed. RAISES authortest.GateRefusal if the test does not discriminate a wrong-stub
+    from the reference, or the (now BLOCKING) fresh-eyes reviewer does not PASS — which halts the phase.
+    Returns the gate-log on PASS, or None when the phase is human-supplied (no agent inputs -> no gate)."""
+    inputs = _phase_agent_inputs(phase)
+    if inputs is None:
+        return None
+    from . import authortest
+    return authortest.gate_phase_test(
+        picks=inputs["picks"], reference=inputs["reference"], wrong_stubs=inputs["wrong_stubs"],
+        agent_test=agent_test, phase=phase["id"], module=phase.get("module", "src/module.js"),
+        test_path=phase["test_path"], work_dir=gate_work, results_dir=results_dir,
+        author_model=phase.get("author_model", "opus"),
+        executor_model=phase.get("executor_model", "sonnet"),
+        reviewer_model=phase.get("reviewer_model", "sonnet"),
+        jest_eval=jest_eval, run_role=run_role, node_modules_src=node_modules_src)
+
+
 def run_phase(phase: dict, *, project: Path, data: Path, out: Path, manifest_dir: Path,
-              language: str, env: dict, run_cmd: list) -> dict:
-    """Lay the phase's RED test + commit (-> base), run the chain, and on SHIP commit the work (-> advance)."""
+              language: str, env: dict, run_cmd: list, gate_jest_eval=None, gate_run_role=None,
+              gate_node_modules_src: Path | None = None) -> dict:
+    """Lay the phase's RED test + commit (-> base), run the chain, and on SHIP commit the work (-> advance).
+
+    For an AGENT-AUTHORED phase (carries picks/reference/wrong_stubs), the red-test mutation gate runs
+    BEFORE the test is committed; a non-discriminating test or a non-PASS reviewer RAISES and halts the
+    phase (#831 slice 2). `gate_jest_eval`/`gate_run_role` inject stubs for unit tests (no models/node)."""
     pid = phase["id"]
     test_path = phase["test_path"]
     dst = project / test_path
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(manifest_dir / phase["test_file"], dst)
+
+    # GATE the agent-authored RED test BEFORE committing it (#831): prove it discriminates a wrong-stub
+    # from the reference + the fresh-eyes reviewer PASSes, else GateRefusal halts the phase. Human-supplied
+    # phases (no picks/reference/wrong_stubs) skip the gate entirely. On a refusal the RED test was already
+    # copied to `dst` but is never committed — unlink it so a refused phase leaves no stray file on disk.
+    from . import authortest
+    try:
+        gate_log = gate_agent_authored_test(
+            phase, agent_test=dst.read_text(), gate_work=out / f"_gate-{pid}",
+            results_dir=out / "results", jest_eval=gate_jest_eval, run_role=gate_run_role,
+            node_modules_src=gate_node_modules_src)
+    except authortest.GateRefusal:
+        dst.unlink(missing_ok=True)   # no stray uncommitted RED test left behind
+        raise
+
     _git(["add", test_path], cwd=project)
     # --allow-empty: on a REUSED project, re-laying a phase whose test file is unchanged stages nothing;
     # still record the phase-boundary commit so the base advances (and a re-run doesn't crash).
@@ -207,22 +274,34 @@ def run_phase(phase: dict, *, project: Path, data: Path, out: Path, manifest_dir
         _git(["commit", "-q", "--allow-empty", "-m",
               f"phase {pid}: SHIP ({who}) — {phase.get('title', test_path)}"], cwd=project)
         committed = _git(["rev-parse", "HEAD"], cwd=project).stdout.strip()
-    return {"id": pid, "base": base, "resolved": shipped,
-            "local_resolved": local_resolved, "handoff_resolved": handoff_resolved,
-            "verdict": res.get("verdict"), "solved_by": who,
-            "handoff_model": handoff.get("model_resolved") or handoff.get("model_requested"),
-            "iterations": res.get("iterations"), "loop_signal": res.get("loop_signal"),
-            "cost_usd": (res.get("telemetry") or {}).get("cost", {}).get("chain_total_cost_usd"),
-            "committed": committed, "result_file": str(res_path)}
+    # Per-phase manifest paper-trail of what the mutation gate used (#831 slice 2). Additive: human-supplied
+    # phases carry None for all three + a null gate-log, so existing manifest consumers are unaffected.
+    record = {"id": pid, "base": base, "resolved": shipped,
+              "local_resolved": local_resolved, "handoff_resolved": handoff_resolved,
+              "verdict": res.get("verdict"), "solved_by": who,
+              "handoff_model": handoff.get("model_resolved") or handoff.get("model_requested"),
+              "iterations": res.get("iterations"), "loop_signal": res.get("loop_signal"),
+              "cost_usd": (res.get("telemetry") or {}).get("cost", {}).get("chain_total_cost_usd"),
+              "committed": committed, "result_file": str(res_path),
+              "picks": phase.get("picks"), "reference": phase.get("reference"),
+              "wrong_stubs": phase.get("wrong_stubs"),
+              "gate_log": (gate_log.get("_gate_log_path") if gate_log else None),
+              "gate_discriminates": (gate_log.get("discriminates") if gate_log else None)}
+    return record
 
 
 def run_build(*, manifest: dict, project: Path, data: Path, out: Path, manifest_dir: Path,
               loop_signal: str = "both", local_timeout_s: str = "900", jest_docker: str = "0",
-              run_cmd: list | None = None, npm_install: bool = True, fresh: bool = False) -> dict:
+              run_cmd: list | None = None, npm_install: bool = True, fresh: bool = False,
+              gate_jest_eval=None, gate_run_role=None, gate_node_modules_src: Path | None = None) -> dict:
     """Scaffold (or REUSE) the project + drive every phase; STOP at the first phase that cannot go green.
 
     By default an existing project is REUSED — the manifest's phases are built on top of its current HEAD, so
     successive builds accumulate into the SAME folder. Pass fresh=True to force a clean wipe + re-scaffold.
+
+    `gate_jest_eval`/`gate_run_role` inject stubs for the per-phase red-test mutation gate (so an
+    agent-authored phase can be unit-tested with no models/node); production leaves them None so the gate
+    uses the real relay.jest_oracle_eval + relay.run_role.
     """
     language = str(manifest.get("language", "javascript")).lower()
     # Resolve to ABSOLUTE paths: the per-phase instance dir holds a symlink `repo` -> project, and a
@@ -244,7 +323,8 @@ def run_build(*, manifest: dict, project: Path, data: Path, out: Path, manifest_
     results, ok = [], True
     for phase in manifest["phases"]:
         r = run_phase(phase, project=project, data=data, out=out, manifest_dir=manifest_dir,
-                      language=language, env=env, run_cmd=run_cmd)
+                      language=language, env=env, run_cmd=run_cmd, gate_jest_eval=gate_jest_eval,
+                      gate_run_role=gate_run_role, gate_node_modules_src=gate_node_modules_src)
         results.append(r)
         if not r["resolved"]:
             ok = False
