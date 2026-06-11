@@ -11,8 +11,22 @@ for the release steps.
 
 ## Unreleased
 
+## [0.2.0] (2026-06-11)
+
 ### Added
 
+* **Safe agent-authored red tests via a mutation gate (#653 slice 1)** — a new
+  `lfah author-test` command (`derive` → approve → `gate`). An independent cloud
+  author writes a failing acceptance test + a reference impl + one near-correct
+  wrong-stub per must-REJECT pick from the operator's multiple-choice picks **only**
+  (never executor code), emits an ELI5, and stops for approval. The mutation gate then
+  runs `relay.jest_oracle_eval` ×2 in a fresh throwaway scaffold — the test must go RED
+  against each wrong-stub and GREEN against the reference (a test that can't tell them
+  apart is rejected as a fake oracle), with a near-correct-mutant surface guard and an
+  advisory fresh-eyes reviewer. Reuses existing engine primitives only (no new chain
+  roles, no `relay.py` changes). Adds `redtest-author-specialist` +
+  `redtest-review-specialist` recipes and a committed gate-log proof on the copy phase
+  (`results/AUTHORTEST-copy.json`, `discriminates:true` from a real jest run).
 * CI workflow (`ci.yml`): ruff lint + pytest on a Linux/macOS × Python 3.10/3.12
   matrix, plus a Conventional Commits check on pushes to `main`.
 * `CONTRIBUTING.md`, issue templates (bug report + feature request), and a PR
