@@ -45,6 +45,14 @@ ALLOWED_AUTHOR_INPUT_KEYS = {"spec", "picks", "example_table"}
 AUTHOR_RECIPE = "redtest-author-specialist"
 REVIEW_RECIPE = "redtest-review-specialist"
 
+# How many trailing chars of the reviewer's reply to retain in the gate-log (the VERDICT line is last,
+# so we keep the tail). Named rather than a magic literal so the retention budget lives in one place.
+_REVIEWER_NOTES_MAXLEN = 1200
+
+# A reviewer verdict counts as a PASS only when it is exactly this. Anything else (CONCERN, UNCLEAR) is
+# treated as non-PASS — which is advisory in slice 1 but BLOCKS the build path / CLI in slice 2.
+_REVIEWER_PASS = "PASS"
+
 
 # ---------------------------------------------------------------------------
 # Author independence: the prompt is built from picks ONLY (never executor output)
@@ -134,6 +142,10 @@ def parse_author_response(text: str) -> dict:
     if not isinstance(obj["wrong_stubs"], list) or not obj["wrong_stubs"]:
         raise ValueError("author JSON: wrong_stubs must be a non-empty list")
     for ws in obj["wrong_stubs"]:
+        # Guard the element TYPE before `.get` — a bare string/None element would otherwise raise a
+        # cryptic AttributeError instead of the clear contract-violation ValueError everything else uses.
+        if not isinstance(ws, dict):
+            raise ValueError(f"author JSON: each wrong_stub must be an object, got {type(ws).__name__}")
         if not ws.get("label") or not ws.get("code"):
             raise ValueError("author JSON: each wrong_stub needs a label and code")
     return obj
@@ -456,14 +468,55 @@ def review(*, derive_manifest: dict, gate_result: dict, bundle_dir: Path, review
     m = re.search(r"VERDICT:\s*(PASS|CONCERN)", text, re.IGNORECASE)
     verdict = m.group(1).upper() if m else "UNCLEAR"
     return {"verdict": verdict, "model": reviewer_model, "advisory": True,
-            "notes": text.strip()[-1200:], "cost_usd": resp.get("cost_usd", 0.0)}
+            "notes": text.strip()[-_REVIEWER_NOTES_MAXLEN:], "cost_usd": resp.get("cost_usd", 0.0)}
+
+
+def reviewer_verdict_ok(verdict) -> bool:
+    """A reviewer verdict is acceptable IFF it is exactly PASS (case-insensitive). CONCERN/UNCLEAR/None
+    are non-PASS. The build path + the slice-2 CLI treat a non-PASS verdict as BLOCKING."""
+    return isinstance(verdict, str) and verdict.strip().upper() == _REVIEWER_PASS
+
+
+class GateRefusal(RuntimeError):
+    """Raised when the mutation gate REFUSES a test (slice 2): either the test does not discriminate a
+    wrong-stub from the reference, or — with reviewer-blocking on — the fresh-eyes reviewer did not PASS.
+    Carries the written gate-log path so the paper trail survives the refusal."""
+
+    def __init__(self, message: str, gate_log: dict | None = None):
+        super().__init__(message)
+        self.gate_log = gate_log
+
+
+def _refusal_reason(gate_result: dict, rev: dict, *, block_on_reviewer: bool) -> str | None:
+    """Return a human-readable refusal reason (naming the failing mutant) if the gate must REFUSE, else
+    None. Discrimination is always blocking; the reviewer verdict blocks only when block_on_reviewer."""
+    if not gate_result["discriminates"]:
+        mutants = gate_result["mutants"]
+        if not mutants.get("reference", {}).get("resolved"):
+            return "reference did not resolve (the test fails even against the correct code)"
+        offenders = [w["label"] for w in mutants.get("wrong_all", [])
+                     if not (w["resolved"] is False and w["surface_match"])]
+        if offenders:
+            return (f"wrong-stub(s) {offenders} failed to discriminate (the test does not go RED "
+                    f"against them, or they expose a different module surface)")
+        return "the test did not discriminate (non-near-correct mutants)"
+    if block_on_reviewer and not reviewer_verdict_ok(rev["verdict"]):
+        return f"fresh-eyes reviewer verdict {rev['verdict']!r} is not PASS"
+    return None
 
 
 def gate(*, bundle_dir: Path, results_dir: Path, work_dir: Path, approved: bool = False,
          approval_path: Path | None = None, jest_eval=None, run_role=None,
-         node_modules_src: Path | None = None, dry_run: bool = False) -> dict:
-    """Step 2. Runs ONLY with a recorded approval. Runs the mutation gate + advisory reviewer and writes
-    the committed gate-log results/AUTHORTEST-<phase>.json. Returns the gate-log dict."""
+         node_modules_src: Path | None = None, dry_run: bool = False,
+         block_on_reviewer: bool = False) -> dict:
+    """Step 2. Runs ONLY with a recorded approval. Runs the mutation gate + fresh-eyes reviewer and writes
+    the committed gate-log results/AUTHORTEST-<phase>.json. Returns the gate-log dict (it does NOT raise on
+    a non-discriminating test — the return value carries `discriminates`/`refused`/`refusal_reason`, and
+    the CALLER decides whether to block). The build path uses `gate_phase_test`, which DOES raise.
+
+    block_on_reviewer (slice 2): when True a non-PASS reviewer verdict counts toward `refused`/
+    `refusal_reason` (and flips the reviewer record from advisory→blocking). Default False = the slice-1
+    advisory-only behavior (verdict recorded, never blocks)."""
     bundle_dir = Path(bundle_dir)
     derive_manifest = json.loads((bundle_dir / "derive.json").read_text())
 
@@ -480,6 +533,11 @@ def gate(*, bundle_dir: Path, results_dir: Path, work_dir: Path, approved: bool 
     reviewer_model = derive_manifest.get("reviewer_model", "sonnet")
     executor_model = derive_manifest["executor_model"]
 
+    # Fail-fast on a mis-configured reviewer (== author) BEFORE the expensive mutation gate runs. `review`
+    # enforces the same invariant, but only after jest×2 — wasteful when the config is wrong up front.
+    if reviewer_model == author_model:
+        raise ValueError(f"reviewer model must differ from author model (both {reviewer_model!r})")
+
     gate_result = run_mutation_gate(derive_manifest=derive_manifest, bundle_dir=bundle_dir,
                                     work_dir=work_dir, jest_eval=jest_eval,
                                     node_modules_src=node_modules_src)
@@ -487,6 +545,7 @@ def gate(*, bundle_dir: Path, results_dir: Path, work_dir: Path, approved: bool 
                  reviewer_model=reviewer_model, author_model=author_model, run_role=run_role,
                  dry_run=dry_run)
 
+    reason = _refusal_reason(gate_result, rev, block_on_reviewer=block_on_reviewer)
     gate_log = {
         "phase": derive_manifest["phase"],
         "module": derive_manifest["module"],
@@ -494,12 +553,15 @@ def gate(*, bundle_dir: Path, results_dir: Path, work_dir: Path, approved: bool 
         "mutants": gate_result["mutants"],
         "author": derive_manifest["author"],
         "executor_model": executor_model,
-        "reviewer": {"verdict": rev["verdict"], "model": rev["model"], "advisory": rev["advisory"],
+        "reviewer": {"verdict": rev["verdict"], "model": rev["model"],
+                     "advisory": not block_on_reviewer, "blocking": block_on_reviewer,
                      "notes": rev["notes"]},
         "picks_file": derive_manifest["picks_file"],
         "author_inputs": derive_manifest["author_inputs"],
         "approval": approval or {"approved": True, "source": "--approved flag"},
         "gate_run": {"jest_docker": "0", "loop": "jest_oracle_eval x2 (wrong->false, reference->true)"},
+        "refused": reason is not None,
+        "refusal_reason": reason,
         "gated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     results_dir = Path(results_dir)
@@ -508,3 +570,60 @@ def gate(*, bundle_dir: Path, results_dir: Path, work_dir: Path, approved: bool 
     out.write_text(json.dumps(gate_log, indent=2) + "\n")
     gate_log["_gate_log_path"] = str(out)
     return gate_log
+
+
+# ---------------------------------------------------------------------------
+# gate_phase_test — the build-run entrypoint: run the gate, RAISE on any refusal (#831 slice 2)
+# ---------------------------------------------------------------------------
+def gate_phase_test(*, picks: dict, reference: str, wrong_stubs: list, agent_test: str,
+                    phase: str, module: str, test_path: str, work_dir: Path, results_dir: Path,
+                    author_model: str = "opus", executor_model: str = "sonnet",
+                    reviewer_model: str = "sonnet", jest_eval=None, run_role=None,
+                    node_modules_src: Path | None = None, dry_run: bool = False) -> dict:
+    """Wire the mutation gate into `build.run_phase`. Given a phase's AGENT-AUTHORED inputs (the operator
+    picks + an already-authored reference/wrong-stubs/test carried INLINE in the build manifest), assemble
+    a derive bundle (source='recorded-fallback' — no live author call, the build already has the artifacts),
+    run the mutation gate + a BLOCKING fresh-eyes reviewer, and RAISE GateRefusal if the test does not
+    discriminate OR the reviewer does not PASS. On success returns the gate-log dict. Reuses `derive` +
+    `gate` (block_on_reviewer=True) — no duplicated jest×2 logic, no relay.py changes."""
+    if not (picks and reference and wrong_stubs and agent_test):
+        raise ValueError("gate_phase_test needs non-empty picks, reference, wrong_stubs, and agent_test")
+    work_dir = Path(work_dir)
+    bundle_dir = work_dir / "bundle"
+    # Persist the inline inputs to temp files so the recorded-fallback derive can read them, exactly as the
+    # standalone CLI path does (one assembly path, not two).
+    inputs_dir = work_dir / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    picks_payload = dict(picks)
+    picks_payload.setdefault("phase", phase)
+    picks_payload.setdefault("module", module)
+    picks_payload.setdefault("test_path", test_path)
+    picks_path = inputs_dir / "picks.json"
+    picks_path.write_text(json.dumps(picks_payload, indent=2) + "\n")
+    ref_path = inputs_dir / "reference.js"
+    ref_path.write_text(reference)
+    test_in = inputs_dir / "agent_test.js"
+    test_in.write_text(agent_test)
+    stub_paths = []
+    for i, ws in enumerate(wrong_stubs):
+        label = (ws.get("label") if isinstance(ws, dict) else None) or f"stub{i}"
+        code = ws.get("code") if isinstance(ws, dict) else ws
+        if not code:
+            raise ValueError(f"gate_phase_test: wrong_stub {label!r} has no code")
+        # Name the file by the bare label so the recorded-fallback derive (which derives a stub's label
+        # from its file STEM) keeps the same label -> the gate run_id stays `wrong-<label>` as expected.
+        sp = inputs_dir / f"{label}{Path(module).suffix}"
+        sp.write_text(code)
+        stub_paths.append(sp)
+
+    derive(picks_path=picks_path, out_dir=bundle_dir, source="recorded-fallback",
+           reference_path=ref_path, wrong_stub_paths=stub_paths, agent_test_path=test_in,
+           author_model=author_model, executor_model=executor_model, reviewer_model=reviewer_model)
+    log = gate(bundle_dir=bundle_dir, results_dir=results_dir, work_dir=work_dir / "gate",
+               approved=True, jest_eval=jest_eval, run_role=run_role,
+               node_modules_src=node_modules_src, dry_run=dry_run, block_on_reviewer=True)
+    if log.get("refused"):
+        raise GateRefusal(
+            f"red-test mutation gate REFUSED phase {phase!r}: {log['refusal_reason']} "
+            f"(gate-log: {log['_gate_log_path']})", gate_log=log)
+    return log

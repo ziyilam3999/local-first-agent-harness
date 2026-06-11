@@ -4,4 +4,4 @@ Runs the heavy executor on a cheap local model, escalates to the cloud only when
 and grades itself with real SWE-bench tests.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

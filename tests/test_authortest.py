@@ -176,3 +176,91 @@ def test_parse_author_response_and_live_derive(tmp_path):
 def test_module_exports_parsing():
     assert authortest.module_exports(_REFERENCE) == {"f"}
     assert authortest.module_exports("exports.a = 1; module.exports.b = 2;") == {"a", "b"}
+
+
+# --------------------------------------------------------------------------- slice-2 helpers + nits
+def test_reviewer_verdict_ok_only_pass():
+    assert authortest.reviewer_verdict_ok("PASS") is True
+    assert authortest.reviewer_verdict_ok("pass") is True
+    for bad in ("CONCERN", "UNCLEAR", "", None, 0):
+        assert authortest.reviewer_verdict_ok(bad) is False
+
+
+def test_nit_parse_author_response_nondict_stub_is_clear_error():
+    """Nit 1: a wrong_stubs entry that is NOT an object must raise a CLEAR ValueError (it used to raise a
+    cryptic AttributeError: 'str' object has no attribute 'get')."""
+    payload = {"agent_test": "t", "reference": "r", "wrong_stubs": ["not-an-object"], "eli5": "e"}
+    with pytest.raises(ValueError, match="must be an object"):
+        authortest.parse_author_response("```json\n" + json.dumps(payload) + "\n```")
+
+
+def test_nit_gate_fails_fast_on_reviewer_equal_author(tmp_path):
+    """Nit 2: gate() must reject reviewer_model == author_model BEFORE running the (expensive) mutation
+    gate. Both opus -> ValueError, and the jest stub must NEVER be called."""
+    _write(tmp_path, picks=_PICKS)
+    p, ref, ws, at = _write(tmp_path)
+    bundle = tmp_path / "bundle"
+    authortest.derive(picks_path=p, out_dir=bundle, source="recorded-fallback",
+                      reference_path=ref, wrong_stub_paths=[ws], agent_test_path=at,
+                      author_model="opus", executor_model="sonnet", reviewer_model="opus")
+
+    called = {"jest": 0}
+
+    def _spy_jest(instance_id, diff_path, run_id):
+        called["jest"] += 1
+        return {"resolved": True, "rc": 0}
+
+    with pytest.raises(ValueError, match="reviewer model must differ"):
+        authortest.gate(bundle_dir=bundle, results_dir=tmp_path / "results", work_dir=tmp_path / "work",
+                        approved=True, jest_eval=_spy_jest, run_role=_fake_review())
+    assert called["jest"] == 0   # fail-fast: the mutation gate never ran
+
+
+def test_gate_block_on_reviewer_records_refusal(tmp_path):
+    """Slice 2: with block_on_reviewer=True a non-PASS reviewer marks the gate-log refused (but the gate()
+    standalone still RETURNS the log — the CLI/build caller decides to block)."""
+    _derive(tmp_path)
+    log = authortest.gate(
+        bundle_dir=tmp_path / "bundle", results_dir=tmp_path / "results", work_dir=tmp_path / "work",
+        approved=True, jest_eval=_fake_jest({"reference": True, "wrong-wrong": False}),
+        run_role=_fake_review("CONCERN"), block_on_reviewer=True)
+    assert log["discriminates"] is True
+    assert log["refused"] is True and "not PASS" in log["refusal_reason"]
+    assert log["reviewer"]["blocking"] is True and log["reviewer"]["advisory"] is False
+
+
+def test_gate_phase_test_blocks_nondiscriminating(tmp_path):
+    """gate_phase_test (the build entrypoint) RAISES GateRefusal when the test passes BOTH mutants."""
+    with pytest.raises(authortest.GateRefusal, match="did not go RED|discriminate"):
+        authortest.gate_phase_test(
+            picks=_PICKS, reference=_REFERENCE,
+            wrong_stubs=[{"label": "branch", "code": _WRONG_SAME_SURFACE}], agent_test=_TRIVIAL_TEST,
+            phase="demo", module="src/m.js", test_path="__tests__/m.test.js",
+            work_dir=tmp_path / "w", results_dir=tmp_path / "r",
+            jest_eval=_fake_jest({"reference": True, "wrong-branch": True}),
+            run_role=_fake_review("PASS"))
+
+
+def test_gate_phase_test_blocks_non_pass_reviewer(tmp_path):
+    """gate_phase_test RAISES when the test discriminates but the reviewer does not PASS (blocking)."""
+    with pytest.raises(authortest.GateRefusal, match="not PASS"):
+        authortest.gate_phase_test(
+            picks=_PICKS, reference=_REFERENCE,
+            wrong_stubs=[{"label": "branch", "code": _WRONG_SAME_SURFACE}], agent_test=_AGENT_TEST,
+            phase="demo", module="src/m.js", test_path="__tests__/m.test.js",
+            work_dir=tmp_path / "w", results_dir=tmp_path / "r",
+            jest_eval=_fake_jest({"reference": True, "wrong-branch": False}),
+            run_role=_fake_review("CONCERN"))
+
+
+def test_gate_phase_test_passes_discriminating(tmp_path):
+    """gate_phase_test returns the gate-log (no raise) for a discriminating test + PASS reviewer."""
+    log = authortest.gate_phase_test(
+        picks=_PICKS, reference=_REFERENCE,
+        wrong_stubs=[{"label": "branch", "code": _WRONG_SAME_SURFACE}], agent_test=_AGENT_TEST,
+        phase="demo", module="src/m.js", test_path="__tests__/m.test.js",
+        work_dir=tmp_path / "w", results_dir=tmp_path / "r",
+        jest_eval=_fake_jest({"reference": True, "wrong-branch": False}),
+        run_role=_fake_review("PASS"))
+    assert log["discriminates"] is True and log["refused"] is False
+    assert log["reviewer"]["verdict"] == "PASS" and log["reviewer"]["blocking"] is True

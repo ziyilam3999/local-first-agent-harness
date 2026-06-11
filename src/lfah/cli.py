@@ -100,6 +100,9 @@ def _build_parser() -> argparse.ArgumentParser:
     atg.add_argument("--approval", default=None, help="Path to an approval.json carrying approved:true.")
     atg.add_argument("--node-modules", default=None, help="Optional node_modules dir to seed (copied) into "
                                                          "the scaffold so npm install is a near-noop/offline.")
+    atg.add_argument("--advisory-reviewer", action="store_true",
+                     help="Slice-1 behavior: the fresh-eyes reviewer is advisory (recorded, never blocks). "
+                          "Default (slice 2) is BLOCKING — a non-PASS verdict refuses the gate.")
     atg.add_argument("--dry-run", action="store_true", help="Stub the reviewer role.")
     return ap
 
@@ -267,13 +270,17 @@ def _author_test(args) -> int:
         print("\nNEXT: surface ELI5.md to the operator for approval, then run `author-test gate --approved`.")
         return 0
     if args.at_mode == "gate":
+        # Slice 2 (#831): the fresh-eyes reviewer is BLOCKING by default (a non-PASS verdict refuses the
+        # gate). `--advisory-reviewer` restores the slice-1 advisory-only behavior (verdict recorded,
+        # never blocks). A non-discriminating test ALWAYS refuses regardless.
+        block_on_reviewer = not getattr(args, "advisory_reviewer", False)
         try:
             log = authortest.gate(
                 bundle_dir=Path(args.bundle).expanduser(), results_dir=Path(args.results).expanduser(),
                 work_dir=Path(args.work).expanduser(), approved=args.approved,
                 approval_path=Path(args.approval).expanduser() if args.approval else None,
                 node_modules_src=Path(args.node_modules).expanduser() if args.node_modules else None,
-                dry_run=args.dry_run)
+                dry_run=args.dry_run, block_on_reviewer=block_on_reviewer)
         except PermissionError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
@@ -282,8 +289,12 @@ def _author_test(args) -> int:
               f"reference.resolved={log['mutants']['reference']['resolved']}  "
               f"wrong.resolved={log['mutants']['wrong']['resolved']}")
         print(f"author.model={log['author']['model']} != executor_model={log['executor_model']}  "
-              f"reviewer={log['reviewer']['model']} verdict={log['reviewer']['verdict']}")
+              f"reviewer={log['reviewer']['model']} verdict={log['reviewer']['verdict']} "
+              f"(blocking={log['reviewer']['blocking']})")
         print(f"\nwritten: {log['_gate_log_path']}")
+        if log.get("refused"):
+            print(f"\nGATE REFUSED: {log['refusal_reason']}", file=sys.stderr)
+            return 1
         return 0 if log["discriminates"] else 1
     print("error: author-test needs a mode: derive | gate", file=sys.stderr)
     return 2
