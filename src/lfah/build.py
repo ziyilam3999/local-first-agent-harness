@@ -191,7 +191,8 @@ def gate_agent_authored_test(phase: dict, *, agent_test: str, gate_work: Path, r
 
 
 def run_phase(phase: dict, *, project: Path, data: Path, out: Path, manifest_dir: Path,
-              language: str, env: dict, run_cmd: list, gate_jest_eval=None, gate_run_role=None,
+              language: str, env: dict, run_cmd: list, executor_recipe: str | None = None,
+              gate_jest_eval=None, gate_run_role=None,
               gate_node_modules_src: Path | None = None) -> dict:
     """Lay the phase's RED test + commit (-> base), run the chain, and on SHIP commit the work (-> advance).
 
@@ -244,8 +245,11 @@ def run_phase(phase: dict, *, project: Path, data: Path, out: Path, manifest_dir
     # Run the chain. lfah exits 1 when ALL_FAITHFUL is false (still a valid result) -> never check=True
     # here, or a faithfulness flag would crash the whole build. Capture stdout to a per-phase log so a
     # failing phase is self-evident (the #641 lesson).
+    # #954 P0: thread the optional executor-recipe override into the per-phase `lfah run` argv (held
+    # constant across the build's phases for one A/B arm). Absent -> no flag -> behavior-preserving.
+    recipe_argv = ["--executor-recipe", executor_recipe] if executor_recipe else []
     proc = _sh([*run_cmd, "run", "--instance", str(inst_dir / "instance.json"),
-                "--local", "--mode", "c", "--out", str(out)], env=env, check=False)
+                "--local", "--mode", "c", "--out", str(out), *recipe_argv], env=env, check=False)
     (out / f"{pid}.log").write_text((proc.stdout or "") + "\n--- STDERR ---\n"
                                     + (proc.stderr or "") + f"\n--- rc={proc.returncode} ---\n")
     res_path = out / f"lfah-{pid}-c.json"
@@ -319,11 +323,16 @@ def run_build(*, manifest: dict, project: Path, data: Path, out: Path, manifest_
     env["LFAH_LOOP_SIGNAL"] = loop_signal   # build's AC is OUR test, not ground truth -> require BOTH (#660)
     env.setdefault("LOCAL_ROLE_TIMEOUT_S", local_timeout_s)
 
+    # #954 P0: a manifest-level executor-recipe override, applied to every phase (held constant per A/B arm).
+    # Absent key -> None -> no override -> behavior-preserving for existing manifests.
+    executor_recipe = manifest.get("executor_recipe")
+
     reused = scaffold_project(project, language, npm_install=npm_install, fresh=fresh)
     results, ok = [], True
     for phase in manifest["phases"]:
         r = run_phase(phase, project=project, data=data, out=out, manifest_dir=manifest_dir,
-                      language=language, env=env, run_cmd=run_cmd, gate_jest_eval=gate_jest_eval,
+                      language=language, env=env, run_cmd=run_cmd, executor_recipe=executor_recipe,
+                      gate_jest_eval=gate_jest_eval,
                       gate_run_role=gate_run_role, gate_node_modules_src=gate_node_modules_src)
         results.append(r)
         if not r["resolved"]:
