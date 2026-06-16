@@ -35,6 +35,11 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="Local model name to use as the executor when running local-first.")
     run.add_argument("--cloud-fallback", default=None,
                      help="Cloud model to escalate to when a local executor times out or gets stuck.")
+    run.add_argument("--executor-recipe", default=None,
+                     help="Override the executor's specialist recipe (the skill manual) for this run. "
+                          "Default: the profile's language-selected recipe (behavior-preserving when "
+                          "omitted). The named recipe's bundle/skills/<name>/SKILL.md must exist — the "
+                          "profile completeness gate refuses a bogus name before any model call.")
     run.add_argument("--mode", choices=["a", "c"], default="c",
                      help="'a' = no replan (1 executor round); 'c' = 1 replan + 1 exec retry (default).")
     run.add_argument("--out", default=None, help="Directory to write the result JSON into.")
@@ -188,6 +193,12 @@ def _run(args) -> int:
         os.environ["LFAH_CLOUD_HANDOFF_MODEL"] = args.cloud_fallback
 
     profile = relay.select_profile(instance)   # language axis: javascript -> jest, else pytest codefix
+    # Optional executor-recipe override (#954 P0 A/B seam): swap the executor's specialist manual while
+    # holding the language-selected oracle/planner/evaluator constant. select_profile returns a FRESH dict
+    # per call, so this mutation is run-local. assert_profile_complete (next line) refuses a bogus recipe
+    # name (its SKILL.md is absent) before any model call -> fail-closed. Absent flag = behavior-preserving.
+    if args.executor_recipe:
+        profile["recipes"]["executor"] = args.executor_recipe
     gate = relay.assert_profile_complete(profile, role_models, role_backends)
 
     print(f"=== lfah run: category={profile['category']} mode={args.mode} "
