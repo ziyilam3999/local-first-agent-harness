@@ -7,7 +7,6 @@ profile mutation are pure-python, and the build-side test stubs a fake `lfah run
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
