@@ -59,6 +59,10 @@ def _build_parser() -> argparse.ArgumentParser:
     build.add_argument("--out", required=True, help="Directory for per-phase results + BUILD-SUMMARY.json.")
     build.add_argument("--loop-signal", default="both", choices=["oracle", "evaluator", "both"],
                        help="Ship gate (default: both — the phase test is OUR AC, not ground truth).")
+    # #961: planner/evaluator model pass-through to the per-phase `lfah run` (the executor runs --local,
+    # so these are the only cloud cost). Default `opus` == today's `lfah run` default -> behavior-preserving.
+    build.add_argument("--planner", default="opus", help="Planner model for every phase (default: opus).")
+    build.add_argument("--evaluator", default="opus", help="Evaluator model for every phase (default: opus).")
     build.add_argument("--no-npm-install", action="store_true",
                        help="Skip `npm install` during scaffold (deps already present / non-JS).")
     build.add_argument("--fresh", action="store_true",
@@ -250,7 +254,8 @@ def _build(args) -> int:
         manifest=manifest, project=Path(args.project).expanduser(),
         data=Path(args.data).expanduser(), out=Path(args.out).expanduser(),
         manifest_dir=manifest_path.parent, loop_signal=args.loop_signal,
-        npm_install=not args.no_npm_install, fresh=args.fresh)
+        npm_install=not args.no_npm_install, fresh=args.fresh,
+        planner_model=args.planner, evaluator_model=args.evaluator)
     print(f"=== lfah build: project={summary['project']} loop_signal={summary['loop_signal']} ===")
     for r in summary["phases"]:
         print(f"  phase {r['id']}: resolved={r['resolved']} by={r['solved_by']} "

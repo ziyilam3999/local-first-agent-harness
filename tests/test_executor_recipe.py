@@ -143,3 +143,39 @@ def test_build_without_field_has_no_recipe_flag(tmp_path):
                     out=out, manifest_dir=md, run_cmd=run_cmd, npm_install=False)
     argv = _recorded_argv(out)
     assert "--executor-recipe" not in argv
+
+
+# --------------------------------------------------------------------------- #961: build planner/evaluator
+# model pass-through (lets the paid A/B run the two cloud roles on cheap Sonnet; default opus is unchanged).
+
+def test_build_help_lists_planner_evaluator():
+    """`lfah build --help` advertises --planner and --evaluator."""
+    out = subprocess.run([sys.executable, "-m", "lfah.cli", "build", "--help"],
+                         capture_output=True, text=True)
+    assert "--planner" in out.stdout
+    assert "--evaluator" in out.stdout
+
+
+def test_build_threads_model_flags_into_run_argv(tmp_path):
+    """A non-default planner/evaluator puts `--planner <m> --evaluator <m>` into the per-phase run argv."""
+    md, run_cmd = _setup(tmp_path)
+    manifest = {"project_name": "app", "language": "text", "phases": _PHASES}
+    out = tmp_path / "out"
+    build.run_build(manifest=manifest, project=tmp_path / "project", data=tmp_path / "data",
+                    out=out, manifest_dir=md, run_cmd=run_cmd, npm_install=False,
+                    planner_model="sonnet", evaluator_model="haiku")
+    argv = _recorded_argv(out)
+    assert argv[argv.index("--planner") + 1] == "sonnet"
+    assert argv[argv.index("--evaluator") + 1] == "haiku"
+
+
+def test_build_defaults_models_to_opus(tmp_path):
+    """Behavior-preserving: with no model args the per-phase argv threads opus (== `lfah run` default)."""
+    md, run_cmd = _setup(tmp_path)
+    manifest = {"project_name": "app", "language": "text", "phases": _PHASES}
+    out = tmp_path / "out"
+    build.run_build(manifest=manifest, project=tmp_path / "project", data=tmp_path / "data",
+                    out=out, manifest_dir=md, run_cmd=run_cmd, npm_install=False)
+    argv = _recorded_argv(out)
+    assert argv[argv.index("--planner") + 1] == "opus"
+    assert argv[argv.index("--evaluator") + 1] == "opus"
