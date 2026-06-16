@@ -597,7 +597,14 @@ def jest_oracle_eval(instance_id: str, diff_path: Path, run_id: str) -> dict:
     jestrepo = work_root / "jestrepo"
     if jestrepo.exists():
         shutil.rmtree(jestrepo)
-    shutil.copytree(src_repo, jestrepo)
+    # Skip the oracle/evaluator scratch dirs while copying. In real chain runs jestrepo
+    # resolves UNDER src_repo (eval_patch_jest.sh sets its work area inside the repo cwd, and
+    # work_root derives from diff_path.parent), so a naive copytree copies the repo into its own
+    # descendant -> unbounded self-recursion -> Errno 63 "File name too long" (#972). 'jest-runs'
+    # is always the parent component of jestrepo, so ignoring it (plus the evaluator's
+    # '.eval_patch_jest-*' scratch) makes copytree never descend into the dir it is writing.
+    shutil.copytree(src_repo, jestrepo,
+                    ignore=shutil.ignore_patterns('.eval_patch_jest-*', 'jest-runs'))
 
     # Guarantee the base state even if the canonical copy drifted, then apply the candidate patch.
     base = instance.get("base_commit")
