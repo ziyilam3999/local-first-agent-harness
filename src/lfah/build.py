@@ -193,6 +193,7 @@ def gate_agent_authored_test(phase: dict, *, agent_test: str, gate_work: Path, r
 def run_phase(phase: dict, *, project: Path, data: Path, out: Path, manifest_dir: Path,
               language: str, env: dict, run_cmd: list, executor_recipe: str | None = None,
               planner_model: str = "opus", evaluator_model: str = "opus",
+              executor_backend: str = "local", executor_model: str = "sonnet",
               gate_jest_eval=None, gate_run_role=None,
               gate_node_modules_src: Path | None = None) -> dict:
     """Lay the phase's RED test + commit (-> base), run the chain, and on SHIP commit the work (-> advance).
@@ -252,8 +253,15 @@ def run_phase(phase: dict, *, project: Path, data: Path, out: Path, manifest_dir
     # #961: thread the planner/evaluator models into every phase's run (executor is --local, $0; these
     # two cloud roles carry the cost). Default "opus" matches `lfah run`'s default -> behavior-preserving.
     model_argv = ["--planner", planner_model, "--evaluator", evaluator_model]
+    # #966: executor-backend seam. local (default) == historical `--local` (local executor + cloud fallback);
+    # cloud runs the executor itself on `--executor <model>` (no local, no fallback) -> fast cells when a slow
+    # local model is the bottleneck. The evaluator stays cloud either way, so executor != evaluator still holds.
+    if executor_backend == "local":
+        exec_argv = ["--local"]
+    else:
+        exec_argv = ["--executor-backend", "cloud", "--executor", executor_model]
     proc = _sh([*run_cmd, "run", "--instance", str(inst_dir / "instance.json"),
-                "--local", "--mode", "c", "--out", str(out), *model_argv, *recipe_argv], env=env, check=False)
+                *exec_argv, "--mode", "c", "--out", str(out), *model_argv, *recipe_argv], env=env, check=False)
     (out / f"{pid}.log").write_text((proc.stdout or "") + "\n--- STDERR ---\n"
                                     + (proc.stderr or "") + f"\n--- rc={proc.returncode} ---\n")
     res_path = out / f"lfah-{pid}-c.json"
@@ -302,6 +310,7 @@ def run_build(*, manifest: dict, project: Path, data: Path, out: Path, manifest_
               loop_signal: str = "both", local_timeout_s: str = "900", jest_docker: str = "0",
               run_cmd: list | None = None, npm_install: bool = True, fresh: bool = False,
               planner_model: str = "opus", evaluator_model: str = "opus",
+              executor_backend: str = "local", executor_model: str = "sonnet",
               gate_jest_eval=None, gate_run_role=None, gate_node_modules_src: Path | None = None) -> dict:
     """Scaffold (or REUSE) the project + drive every phase; STOP at the first phase that cannot go green.
 
@@ -338,6 +347,7 @@ def run_build(*, manifest: dict, project: Path, data: Path, out: Path, manifest_
         r = run_phase(phase, project=project, data=data, out=out, manifest_dir=manifest_dir,
                       language=language, env=env, run_cmd=run_cmd, executor_recipe=executor_recipe,
                       planner_model=planner_model, evaluator_model=evaluator_model,
+                      executor_backend=executor_backend, executor_model=executor_model,
                       gate_jest_eval=gate_jest_eval,
                       gate_run_role=gate_run_role, gate_node_modules_src=gate_node_modules_src)
         results.append(r)

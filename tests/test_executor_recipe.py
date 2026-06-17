@@ -179,3 +179,44 @@ def test_build_defaults_models_to_opus(tmp_path):
     argv = _recorded_argv(out)
     assert argv[argv.index("--planner") + 1] == "opus"
     assert argv[argv.index("--evaluator") + 1] == "opus"
+
+
+# --------------------------------------------------------------------------- #966: executor-backend seam
+# Lets the paid A/B run the executor itself on the cloud (fast cells) instead of the slow local model.
+# Both-ends: default (local) MUST still emit the historical `--local`; cloud MUST emit
+# `--executor-backend cloud --executor <model>` and NO `--local`.
+
+def test_build_help_lists_executor_backend():
+    """`lfah build --help` advertises --executor-backend and --executor."""
+    out = subprocess.run([sys.executable, "-m", "lfah.cli", "build", "--help"],
+                         capture_output=True, text=True)
+    assert "--executor-backend" in out.stdout
+    assert "--executor" in out.stdout
+
+
+def test_build_default_backend_is_local_and_emits_local_flag(tmp_path):
+    """Behavior-preserving: with no backend arg the per-phase argv carries `--local` (historical default)
+    and NOT the cloud-executor flags."""
+    md, run_cmd = _setup(tmp_path)
+    manifest = {"project_name": "app", "language": "text", "phases": _PHASES}
+    out = tmp_path / "out"
+    build.run_build(manifest=manifest, project=tmp_path / "project", data=tmp_path / "data",
+                    out=out, manifest_dir=md, run_cmd=run_cmd, npm_install=False)
+    argv = _recorded_argv(out)
+    assert "--local" in argv
+    assert "--executor-backend" not in argv
+
+
+def test_build_cloud_backend_emits_cloud_executor_flags(tmp_path):
+    """executor_backend='cloud' threads `--executor-backend cloud --executor <model>` and DROPS `--local`
+    (the executor itself runs on the cloud model — no local, no fallback)."""
+    md, run_cmd = _setup(tmp_path)
+    manifest = {"project_name": "app", "language": "text", "phases": _PHASES}
+    out = tmp_path / "out"
+    build.run_build(manifest=manifest, project=tmp_path / "project", data=tmp_path / "data",
+                    out=out, manifest_dir=md, run_cmd=run_cmd, npm_install=False,
+                    executor_backend="cloud", executor_model="sonnet")
+    argv = _recorded_argv(out)
+    assert "--local" not in argv
+    assert argv[argv.index("--executor-backend") + 1] == "cloud"
+    assert argv[argv.index("--executor") + 1] == "sonnet"
