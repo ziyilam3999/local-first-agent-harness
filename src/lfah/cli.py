@@ -63,6 +63,15 @@ def _build_parser() -> argparse.ArgumentParser:
     # so these are the only cloud cost). Default `opus` == today's `lfah run` default -> behavior-preserving.
     build.add_argument("--planner", default="opus", help="Planner model for every phase (default: opus).")
     build.add_argument("--evaluator", default="opus", help="Evaluator model for every phase (default: opus).")
+    # #966: executor-backend seam for `build`. Default `local` == historical behavior (the per-phase run got a
+    # hardcoded `--local`: local executor model + cloud fallback). `cloud` runs the executor itself on the
+    # cloud --executor model (no --local, no fallback) — far faster per cell when a slow local model is the
+    # bottleneck. Behavior-preserving by default.
+    build.add_argument("--executor-backend", choices=["cloud", "local"], default="local",
+                       help="Where the per-phase executor runs (default: local == --local: local model + cloud "
+                            "fallback). 'cloud' runs the executor on --executor (no local, no fallback).")
+    build.add_argument("--executor", default="sonnet",
+                       help="Executor model when --executor-backend cloud (default: sonnet). Ignored for local.")
     build.add_argument("--no-npm-install", action="store_true",
                        help="Skip `npm install` during scaffold (deps already present / non-JS).")
     build.add_argument("--fresh", action="store_true",
@@ -255,7 +264,8 @@ def _build(args) -> int:
         data=Path(args.data).expanduser(), out=Path(args.out).expanduser(),
         manifest_dir=manifest_path.parent, loop_signal=args.loop_signal,
         npm_install=not args.no_npm_install, fresh=args.fresh,
-        planner_model=args.planner, evaluator_model=args.evaluator)
+        planner_model=args.planner, evaluator_model=args.evaluator,
+        executor_backend=args.executor_backend, executor_model=args.executor)
     print(f"=== lfah build: project={summary['project']} loop_signal={summary['loop_signal']} ===")
     for r in summary["phases"]:
         print(f"  phase {r['id']}: resolved={r['resolved']} by={r['solved_by']} "
